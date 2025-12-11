@@ -1,0 +1,4 @@
+[general]
+# Force l'utilisation de la version 3.11 pour correspondre à votre environnement local
+# et assurer la compatibilité avec mediapipe.
+pythonVersion = 3.11
