@@ -305,9 +305,19 @@ def main_loop(fig_dashboard=None, st_plot=None, st_frame=None, st_feedback=None)
 
         # Dashboard
         if time.time()-last_dashboard_update_local > DASHBOARD_UPDATE_INTERVAL:
-            update_dashboard(fig_dashboard, round(focus,2), round(eye_closed_val,2), round(face_detected_val,2), round(unstable_val,2))
+            fig_dashboard = update_dashboard(
+                fig_dashboard, 
+                round(focus,2), 
+                round(eye_closed_val,2), 
+                round(face_detected_val,2), 
+                round(unstable_val,2)
+            )
+            st_plot.plotly_chart(fig_dashboard)  # ✅ Un seul update
             last_dashboard_update_local = time.time()
-        st_plot.plotly_chart(fig_dashboard)
+
+
+
+
 
         # Draw feedback on frame
         cv2.rectangle(frame_display, (x_min,y_min), (x_max,y_max), (0,255,0), 2)
