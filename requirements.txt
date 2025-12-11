@@ -1,4 +1,6 @@
-opencv-python
-numpy
-mediapipe
 streamlit==1.28.1
+mediapipe==0.10.14
+opencv-python-headless==4.11.0.86
+numpy==1.26.4
+pandas==2.3.3
+Pillow==10.4.0
