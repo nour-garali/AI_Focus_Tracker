@@ -1,6 +1,9 @@
+# requirements.txt
 streamlit
 opencv-python-headless
 numpy
-mediapipe
-tensorflow
+mediapipe==0.10.11 # Version stable pour Python 3.10/3.11
+tensorflow==2.16.1 # Ou une version connue compatible
 plotly
+scipy
+Pillow
