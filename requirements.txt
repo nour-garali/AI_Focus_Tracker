@@ -1,13 +1,12 @@
 # =========================================================
-# Configuration de la version Python (IMPORTANT)
-# Uniquement pour le mode DÉPLOIEMENT STANDARD
-# Fichier runtime.txt doit contenir: python-3.11
-# (Non nécessaire si vous utilisez Docker)
+# Dépendances nettoyées et corrigées pour Streamlit Cloud.
+# Suppression de tous les chemins locaux (@ file:///).
+# Correction de la version de Mediapipe pour la compatibilité Python 3.13.9.
 # =========================================================
 
 # Dépendances Core de l'application
 streamlit==1.28.1
-mediapipe==0.10.14
+mediapipe==0.10.11  # Changé de 0.10.14 pour améliorer la compatibilité Python 3.13.9
 opencv-python==4.11.0.86
 opencv-contrib-python==4.11.0.86
 streamlit-webrtc==0.64.5
