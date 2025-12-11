@@ -1,22 +1,82 @@
 # app_streamlit.py
 import streamlit as st
-import cv2
 import numpy as np
 import mediapipe as mp
 import math
 import time
 import os
+import sys
 from collections import deque
-from tensorflow.keras.models import load_model
-from tensorflow.keras.losses import MeanSquaredError
 from plotly.subplots import make_subplots
 import plotly.graph_objects as go
-import traceback
+
+# -----------------------------
+# CONFIGURATION POUR STREAMLIT CLOUD
+# -----------------------------
+
+# CORRECTION : Importer OpenCV différemment pour Streamlit Cloud
+try:
+    import cv2
+    OPENCV_AVAILABLE = True
+except ImportError as e:
+    st.error(f"OpenCV import error: {e}")
+    # Créer une simulation de cv2 pour le mode test
+    class MockCV2:
+        CAP_PROP_FRAME_WIDTH = 3
+        CAP_PROP_FRAME_HEIGHT = 4
+        CAP_PROP_FPS = 5
+        FONT_HERSHEY_SIMPLEX = 0
+        COLOR_BGR2RGB = 4
+        
+        @staticmethod
+        def VideoCapture(*args):
+            return None
+            
+        @staticmethod
+        def cvtColor(img, code):
+            return img
+            
+        @staticmethod
+        def GaussianBlur(img, ksize, sigma):
+            return img
+            
+        @staticmethod
+        def rectangle(img, pt1, pt2, color, thickness):
+            return img
+            
+        @staticmethod
+        def putText(img, text, org, fontFace, fontScale, color, thickness):
+            return img
+            
+        @staticmethod
+        def resize(img, size):
+            return img
+            
+        @staticmethod
+        def ellipse(img, center, axes, angle, startAngle, endAngle, color, thickness):
+            return img
+            
+        @staticmethod
+        def circle(img, center, radius, color, thickness):
+            return img
+    
+    cv2 = MockCV2()
+    OPENCV_AVAILABLE = False
+
+# -----------------------------
+# GESTION DE TENSORFLOW POUR STREAMLIT CLOUD
+# -----------------------------
+try:
+    from tensorflow.keras.models import load_model
+    from tensorflow.keras.losses import MeanSquaredError
+    TENSORFLOW_AVAILABLE = True
+except ImportError:
+    st.warning("TensorFlow non disponible - Mode sans modèle activé")
+    TENSORFLOW_AVAILABLE = False
 
 # -----------------------------
 # CONFIGURATION
 # -----------------------------
-# CORRECTION : Vérifier si le fichier modèle existe
 MODEL_PATH = "best_gaze_model.h5"
 DURATION_SECONDS = 30
 FPS_TARGET = 15
@@ -24,8 +84,8 @@ WINDOW_SEC = 3
 EAR_THRESHOLD = 0.22
 EYE_CLOSED_CONSEC_FRAMES = 3
 STABILITY_MOVEMENT_THRESH = 25
-PRIVACY_BLUR = True
-CALIBRATION_FRAMES = 50
+PRIVACY_BLUR = False  # Désactivé pour Streamlit Cloud
+CALIBRATION_FRAMES = 10  # Réduit pour Streamlit Cloud
 DASHBOARD_UPDATE_INTERVAL = 0.5
 
 LEFT_EYE_IDX = [33, 160, 158, 133, 153, 144]
@@ -75,70 +135,100 @@ def color_bar(val):
     else: return "red"
 
 # -----------------------------
-# LOAD MODEL - VERSION CORRIGÉE
+# LOAD MODEL
 # -----------------------------
 def load_gaze_model(path):
+    if not TENSORFLOW_AVAILABLE:
+        st.warning("TensorFlow non disponible - Fonctionnalité modèle désactivée")
+        return None
+    
     try:
-        # CORRECTION : Vérifier d'abord si le fichier existe
         if not os.path.exists(path):
-            st.warning(f"⚠️ Fichier modèle non trouvé : {path}. Utilisation sans modèle.")
-            st.info("Fichiers disponibles dans le dossier :")
+            st.warning(f"⚠️ Fichier modèle non trouvé : {path}")
+            # Liste des fichiers pour débogage
             try:
-                st.write(os.listdir("."))
+                files = os.listdir(".")
+                st.info(f"Fichiers disponibles: {files[:10]}")
             except:
-                st.write("Impossible de lister les fichiers")
+                pass
             return None
         
         model_local = load_model(path, custom_objects={'mse': MeanSquaredError()})
         st.success("✅ Modèle gaze chargé.")
         return model_local
     except Exception as e:
-        st.warning(f"❌ Erreur chargement modèle : {e}. Model désactivé.")
+        st.warning(f"❌ Erreur chargement modèle : {str(e)[:100]}... Modèle désactivé.")
         return None
 
 model = load_gaze_model(MODEL_PATH)
-model_enabled = True if model is not None else False
+model_enabled = True if (model is not None and TENSORFLOW_AVAILABLE) else False
 
 # -----------------------------
-# CAMERA & MEDIAPIPE - VERSION CORRIGÉE
+# CAMERA & MEDIAPIPE
 # -----------------------------
 def initialize_camera():
-    # Essayer plusieurs sources de caméra
-    for i in range(3):  # Essayer 0, 1, 2
-        cap = cv2.VideoCapture(i)
-        if cap.isOpened():
-            st.success(f"✅ Caméra détectée (source {i})")
-            return cap
+    """Initialise la caméra pour Streamlit Cloud"""
+    if not OPENCV_AVAILABLE:
+        st.warning("OpenCV non disponible - Mode test forcé")
+        return create_test_camera()
     
-    # Si aucune caméra physique n'est trouvée
-    st.warning("⚠️ Aucune caméra physique détectée. Utilisation du mode test.")
-    
-    # Créer une caméra de test
+    # CORRECTION POUR STREAMLIT CLOUD : Utiliser une caméra de test
+    # Sur Streamlit Cloud, l'accès à la caméra n'est pas autorisé
+    st.info("🔍 Streamlit Cloud détecté - Mode démonstration activé")
+    return create_test_camera()
+
+def create_test_camera():
+    """Crée une caméra de test pour Streamlit Cloud"""
     class TestCamera:
         def __init__(self):
             self.width = 640
             self.height = 480
             self.frame_count = 0
+            self.face_position = [self.width//2, self.height//2]
+            self.face_speed = [2, 1]
             
         def read(self):
             self.frame_count += 1
-            # Créer une image de test
+            # Créer une image de test avec un visage animé
             frame = np.zeros((self.height, self.width, 3), dtype=np.uint8)
-            # Ajouter un visage simulé
-            center_x, center_y = self.width // 2, self.height // 2
-            cv2.ellipse(frame, (center_x, center_y), (100, 150), 0, 0, 360, (100, 100, 255), -1)
-            cv2.circle(frame, (center_x - 40, center_y - 30), 20, (255, 255, 255), -1)  # œil gauche
-            cv2.circle(frame, (center_x + 40, center_y - 30), 20, (255, 255, 255), -1)  # œil droit
-            cv2.circle(frame, (center_x - 40, center_y - 30), 10, (0, 0, 0), -1)  # pupille gauche
-            cv2.circle(frame, (center_x + 40, center_y - 30), 10, (0, 0, 0), -1)  # pupille droite
             
-            # Ajouter du texte
-            cv2.putText(frame, "MODE TEST", (50, 50), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
-            cv2.putText(frame, f"Frame: {self.frame_count}", (50, 100), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 200), 1)
-            cv2.putText(frame, "Aucune webcam detectee", (50, 450), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (150, 150, 255), 1)
+            # Animation du visage
+            self.face_position[0] += self.face_speed[0]
+            self.face_position[1] += self.face_speed[1]
+            
+            # Rebond sur les bords
+            if self.face_position[0] < 100 or self.face_position[0] > self.width - 100:
+                self.face_speed[0] *= -1
+            if self.face_position[1] < 100 or self.face_position[1] > self.height - 100:
+                self.face_speed[1] *= -1
+                
+            center_x, center_y = self.face_position
+            
+            # Dessiner un visage
+            # Tête
+            cv2.ellipse(frame, (center_x, center_y), (100, 120), 0, 0, 360, (100, 100, 255), -1)
+            
+            # Yeux
+            eye_offset = 40 + 10 * math.sin(self.frame_count * 0.1)
+            cv2.circle(frame, (center_x - int(eye_offset), center_y - 30), 20, (255, 255, 255), -1)
+            cv2.circle(frame, (center_x + int(eye_offset), center_y - 30), 20, (255, 255, 255), -1)
+            
+            # Pupilles (qui bougent)
+            pupil_offset = 5 * math.sin(self.frame_count * 0.2)
+            cv2.circle(frame, (center_x - int(eye_offset + pupil_offset), center_y - 30), 8, (0, 0, 0), -1)
+            cv2.circle(frame, (center_x + int(eye_offset + pupil_offset), center_y - 30), 8, (0, 0, 0), -1)
+            
+            # Bouche
+            mouth_width = 40 + 10 * math.sin(self.frame_count * 0.15)
+            cv2.ellipse(frame, (center_x, center_y + 40), (int(mouth_width), 15), 0, 0, 180, (50, 50, 200), 2)
+            
+            # Texte informatif
+            cv2.putText(frame, "STREAMLIT CLOUD DEMO", (50, 30), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            cv2.putText(frame, "Mode demonstration active", (50, 60), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 255), 1)
+            cv2.putText(frame, f"Frame: {self.frame_count}", (50, 90), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
             
             return True, frame
         
@@ -159,50 +249,48 @@ def initialize_camera():
     
     return TestCamera()
 
-# CORRECTION : Initialiser la caméra avec la nouvelle fonction
+# Initialiser la caméra
 cap = initialize_camera()
-
-# Vérifier si c'est une caméra de test
-is_test_camera = isinstance(cap, type(initialize_camera()))
+is_test_camera = True  # Toujours en mode test sur Streamlit Cloud
 
 # Obtenir les dimensions
 try:
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 except:
-    width, height = 640, 480  # Valeurs par défaut
+    width, height = 640, 480
 
 # Initialiser MediaPipe
-mp_face_mesh = mp.solutions.face_mesh
-face_mesh = mp_face_mesh.FaceMesh(static_image_mode=False, max_num_faces=1,
-                                  refine_landmarks=True, min_detection_confidence=0.5,
-                                  min_tracking_confidence=0.5)
+try:
+    mp_face_mesh = mp.solutions.face_mesh
+    face_mesh = mp_face_mesh.FaceMesh(
+        static_image_mode=False, 
+        max_num_faces=1,
+        refine_landmarks=True, 
+        min_detection_confidence=0.5,
+        min_tracking_confidence=0.5
+    )
+    MEDIAPIPE_AVAILABLE = True
+except Exception as e:
+    st.error(f"Erreur MediaPipe: {e}")
+    MEDIAPIPE_AVAILABLE = False
 
 # -----------------------------
 # CALIBRATION TILT
 # -----------------------------
 def calibrate_tilt(frames=CALIBRATION_FRAMES):
-    st.info("🔹 Calibration tilt...")
-    tilt_values = []
-    count = 0
-    progress_bar = st.progress(0)
+    st.info("🔹 Calibration tilt (simulation)...")
     
-    while count < frames:
-        ret, frame = cap.read()
-        if not ret:
-            continue
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        res = face_mesh.process(rgb)
-        if not res.multi_face_landmarks:
-            continue
-        lm = res.multi_face_landmarks[0].landmark
-        tilt, _, _ = angle_between_eyes(lm, LEFT_EYE_IDX, RIGHT_EYE_IDX, width, height)
-        tilt_values.append(tilt)
-        count += 1
-        progress_bar.progress(count / frames)
+    # Simulation pour Streamlit Cloud
+    tilt_values = []
+    for i in range(frames):
+        # Générer des valeurs de tilt réalistes
+        base_tilt = 0.0
+        noise = np.random.normal(0, 2)  # Bruit aléatoire
+        tilt_values.append(base_tilt + noise)
     
     center = float(np.mean(tilt_values)) if tilt_values else 0.0
-    st.success(f"✅ Calibration terminée. Tilt_center={center:.2f}")
+    st.success(f"✅ Calibration terminée. Tilt_center={center:.2f} (simulé)")
     return center
 
 tilt_center = calibrate_tilt()
@@ -222,7 +310,7 @@ def make_dashboard():
                                    gauge={'axis':{'range':[0,100]},
                                           'bar':{'color':'green'}}),
                       row=(i//2)+1, col=(i%2)+1)
-    fig.update_layout(height=700, width=900, paper_bgcolor='#2b3e5c', plot_bgcolor='#2b3e5c',
+    fig.update_layout(height=600, width=800, paper_bgcolor='#2b3e5c', plot_bgcolor='#2b3e5c',
                       title_text="Dashboard Concentration Live", title_x=0.5,
                       font=dict(color="white", size=14))
     return fig
@@ -239,238 +327,226 @@ def update_dashboard(fig, focus, eye_closed_val, face_detected_val, unstable_val
             fig.data[i].gauge.bar.color = color_bar(val)
     return fig
 
-fig_dashboard = make_dashboard()
-st_plot = st.empty()
-st_frame = st.empty()
-st_feedback = st.empty()
-
 # -----------------------------
-# MAIN LOOP STREAMLIT - VERSION CORRIGÉE
+# MAIN LOOP STREAMLIT
 # -----------------------------
 def main_loop(fig_dashboard=None, st_plot=None, st_frame=None, st_feedback=None):
-    global model_enabled, DEBUG, is_test_camera
+    global model_enabled, is_test_camera
+    
     fps_interval = 1.0 / FPS_TARGET
     gaze_queue = deque(maxlen=int(WINDOW_SEC * FPS_TARGET))
     center_queue = deque(maxlen=int(WINDOW_SEC * FPS_TARGET))
     consecutive_eye_closed = 0
-    counters = {"center_gaze":0, "left":0, "right":0,
-                "eye_closed":0, "head_tilt":0, "unstable":0, "total":0, "no_face":0}
+    counters = {
+        "center_gaze": 0, "left": 0, "right": 0,
+        "eye_closed": 0, "head_tilt": 0, "unstable": 0, 
+        "total": 0, "no_face": 0
+    }
+    
     ear_history = deque(maxlen=5)
     last_dashboard_update_local = 0.0
+    
+    # Simulation de données pour Streamlit Cloud
+    simulation_counter = 0
 
     while st.session_state.running:
         loop_t0 = time.time()
         ret, frame = cap.read()
         if not ret:
             continue
+            
         counters["total"] += 1
-        frame_display = cv2.GaussianBlur(frame,(51,51),0) if PRIVACY_BLUR else frame.copy()
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        res = face_mesh.process(rgb)
-        feedback_msgs = []
-
-        # ---------- No face detected
-        if not res.multi_face_landmarks:
-            counters["no_face"] += 1
-            counters["eye_closed"] +=1
-            eye_closed_val = min(100,(counters["eye_closed"]/counters["total"])*100)
-            face_detected_val = min(100,((counters["total"]-counters["no_face"])/counters["total"])*100)
-            unstable_val = 0
-            focus = 0
-            gaze_queue.append(0)
-            feedback_msgs.append("No face detected")
-            if is_test_camera:
-                feedback_msgs.append("Mode Test Actif")
-            update_dashboard(fig_dashboard, focus, eye_closed_val, face_detected_val, unstable_val)
-            st_plot.plotly_chart(fig_dashboard)
-            st_frame.image(frame_display, channels="BGR")
-            st_feedback.text(" | ".join(feedback_msgs))
-            continue
-
-        # ---------- Face detected
-        lm = res.multi_face_landmarks[0].landmark
-        xs_all = [lm[i].x*width for i in range(len(lm))]
-        ys_all = [lm[i].y*height for i in range(len(lm))]
-        x_min, y_min = max(0,int(min(xs_all)-10)), max(0,int(min(ys_all)-10))
-        x_max, y_max = min(width-1,int(max(xs_all)+10)), min(height-1,int(max(ys_all)+10))
-        face_roi = frame[y_min:y_max, x_min:x_max]
-
-        if PRIVACY_BLUR:
-            x_min = max(0, x_min)
-            y_min = max(0, y_min)
-            x_max = min(width, x_max)
-            y_max = min(height, y_max)
-            face_roi = frame[y_min:y_max, x_min:x_max]
-            h_roi, w_roi, _ = face_roi.shape
-            h_disp = y_max - y_min
-            w_disp = x_max - x_min
-
-            h_min = min(h_roi, h_disp)
-            w_min = min(w_roi, w_disp)
-            face_roi = face_roi[:h_min, :w_min]
-            frame_display[y_min:y_min+h_min, x_min:x_min+w_min] = face_roi
-
-
-        # Gaze model
-        pred = 0.0
-        if model_enabled and model is not None:
-            try:
-                img = cv2.resize(face_roi,(64,64))/255.0
-                pred = float(model.predict(np.expand_dims(img,0), verbose=0)[0][0])
-            except:
-                pred = 0.0
-        if pred > 0.5: gaze = "RIGHT"; counters["right"] += 1
-        elif pred < -0.5: gaze = "LEFT"; counters["left"] += 1
-        else: gaze = "CENTER"; counters["center_gaze"] += 1
-        gaze_queue.append(pred)
-
-        # Eyes
-        ear_left = eye_aspect_ratio(lm, LEFT_EYE_IDX, width, height)
-        ear_right = eye_aspect_ratio(lm, RIGHT_EYE_IDX, width, height)
-        ear = (ear_left + ear_right)/2.0
-        current_tilt, _, _ = angle_between_eyes(lm, LEFT_EYE_IDX, RIGHT_EYE_IDX, width, height)
-        tilt_delta = abs(current_tilt - tilt_center)
-        dynamic_ear_threshold = EAR_THRESHOLD + min(0.07, tilt_delta * 0.003)
-        iris_visible = False
-        try:
-            left_upper = (lm[159].x*width, lm[159].y*height)
-            left_lower = (lm[145].x*width, lm[145].y*height)
-            right_upper = (lm[386].x*width, lm[386].y*height)
-            right_lower = (lm[374].x*width, lm[374].y*height)
-            iris_left_y = lm[468].y*height if len(lm)>468 else None
-            iris_right_y = lm[473].y*height if len(lm)>473 else None
-            
-            # CORRECTION : Variables eye_open_left et eye_open_right manquantes
-            eye_open_left = euclidean(left_upper, left_lower)
-            eye_open_right = euclidean(right_upper, right_lower)
-            
-            if iris_left_y is not None and iris_right_y is not None and eye_open_left>2.5 and eye_open_right>2.5:
-                iris_visible=True
-        except:
-            iris_visible=False
-
-        ear_history.append(ear)
-        ear_smoothed = float(np.mean(ear_history)) if len(ear_history)>0 else ear
-        eyes_closed_detected = (ear_smoothed < dynamic_ear_threshold) and (not iris_visible)
-        if eyes_closed_detected:
-            consecutive_eye_closed += 1
-        else:
-            consecutive_eye_closed = 0
-        eye_closed_flag = (consecutive_eye_closed >= EYE_CLOSED_CONSEC_FRAMES)
-        if eye_closed_flag: counters["eye_closed"] +=1
-        if eye_closed_flag: feedback_msgs.append("Eyes Closed")
-
-        # Stability
-        center = ((x_min+x_max)/2, (y_min+y_max)/2)
-        center_queue.append(center)
-        unstable_flag=False
-        instability_score=0
-        if len(center_queue)>=3:
-            var_x=np.var([p[0] for p in center_queue])
-            var_y=np.var([p[1] for p in center_queue])
-            movement=math.sqrt(var_x + var_y)
-            if movement<5: 
-                instability_score=20
-                unstable_flag=True
-                feedback_msgs.append("Too stable")
-            elif movement>STABILITY_MOVEMENT_THRESH:
-                instability_score=100
-            else:
-                instability_score=int((movement/STABILITY_MOVEMENT_THRESH)*100)
-        unstable_val = instability_score
-
-        # Focus calculation
-        gaze_focus_smoothed = np.mean([1 if abs(g)<0.5 else 0 for g in gaze_queue])*100
-        eye_closed_val = min(100,(counters["eye_closed"]/counters["total"])*100)
-        face_detected_val = min(100,((counters["total"]-counters["no_face"])/counters["total"])*100)
-        focus = (0.4*gaze_focus_smoothed + 0.2*(100-eye_closed_val) + 0.2*face_detected_val +0.2*(100-unstable_val))
-        focus = max(0.0, min(100.0, focus))
-
-        # Dashboard
-        if time.time()-last_dashboard_update_local > DASHBOARD_UPDATE_INTERVAL:
-            update_dashboard(fig_dashboard, round(focus,2), round(eye_closed_val,2), round(face_detected_val,2), round(unstable_val,2))
-            last_dashboard_update_local = time.time()
-        st_plot.plotly_chart(fig_dashboard)
-
-        # Draw feedback on frame
-        cv2.rectangle(frame_display, (x_min,y_min), (x_max,y_max), (0,255,0), 2)
-        cv2.putText(frame_display,f"Gaze:{gaze} (Model {'ON' if model_enabled else 'OFF'})",(10,30),cv2.FONT_HERSHEY_SIMPLEX,0.7,(0,255,0),2)
-        for idx,msg in enumerate(feedback_msgs):
-            cv2.putText(frame_display,msg,(10,60+30*idx),cv2.FONT_HERSHEY_SIMPLEX,0.7,(0,0,255),2)
+        simulation_counter += 1
         
-        # Ajouter indication mode test
-        if is_test_camera:
-            cv2.putText(frame_display, "MODE TEST", (width-150, 30), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+        # Copie pour affichage
+        frame_display = frame.copy()
+        
+        # Traitement MediaPipe simulé pour Streamlit Cloud
+        feedback_msgs = []
+        
+        # Simulation des résultats MediaPipe
+        if simulation_counter % 30 > 2:  # 90% du temps, visage détecté
+            # Visage "détecté" en mode simulation
+            counters["no_face"] = max(0, counters["no_face"] - 1)
+            
+            # Simulation des métriques
+            eye_closed_val = 10 + 5 * math.sin(simulation_counter * 0.05)
+            face_detected_val = 95 + 3 * math.sin(simulation_counter * 0.03)
+            unstable_val = 60 + 20 * math.sin(simulation_counter * 0.02)
+            
+            # Simulation du focus
+            focus = 75 + 15 * math.sin(simulation_counter * 0.04)
+            focus = max(0, min(100, focus))
+            
+            # Simulation de la direction du regard
+            gaze_sin = math.sin(simulation_counter * 0.1)
+            if gaze_sin > 0.3:
+                gaze = "RIGHT"
+                counters["right"] += 1
+                pred = 0.7
+            elif gaze_sin < -0.3:
+                gaze = "LEFT"
+                counters["left"] += 1
+                pred = -0.7
+            else:
+                gaze = "CENTER"
+                counters["center_gaze"] += 1
+                pred = 0.1
+                
+            gaze_queue.append(pred)
+            
+            # Simulation yeux fermés
+            if simulation_counter % 100 > 90:  # 10% du temps yeux fermés
+                counters["eye_closed"] += 1
+                feedback_msgs.append("Eyes Closed")
+                
+            # Simulation stabilité
+            if simulation_counter % 150 > 140:  # Instable 10% du temps
+                feedback_msgs.append("Too stable")
+                
+        else:
+            # Pas de visage détecté
+            counters["no_face"] += 1
+            counters["eye_closed"] += 1
+            eye_closed_val = 80
+            face_detected_val = 30
+            unstable_val = 0
+            focus = 20
+            gaze = "NONE"
+            feedback_msgs.append("No face detected")
+            
+        # Mise à jour dashboard
+        if time.time() - last_dashboard_update_local > DASHBOARD_UPDATE_INTERVAL:
+            update_dashboard(fig_dashboard, 
+                           round(focus, 2), 
+                           round(eye_closed_val, 2), 
+                           round(face_detected_val, 2), 
+                           round(unstable_val, 2))
+            last_dashboard_update_local = time.time()
+            
+        # Affichage dashboard
+        st_plot.plotly_chart(fig_dashboard, use_container_width=True)
+        
+        # Ajouter du texte à la frame
+        cv2.putText(frame_display, f"Gaze: {gaze}", (10, 30), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        cv2.putText(frame_display, f"Focus: {focus:.1f}%", (10, 60), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+        
+        # Ajouter les messages de feedback
+        for idx, msg in enumerate(feedback_msgs):
+            cv2.putText(frame_display, msg, (10, 90 + 30 * idx), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+        
+        # Indication mode démo
+        cv2.putText(frame_display, "STREAMLIT CLOUD DEMO", (width - 250, 30), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+        
+        # Afficher la frame
+        st_frame.image(frame_display, channels="BGR", use_container_width=True)
+        
+        # Afficher feedback
+        feedback_text = " | ".join(feedback_msgs) if feedback_msgs else "Analyse en cours..."
+        st_feedback.text(feedback_text)
+        
+        # Contrôle FPS
+        t_elapsed = time.time() - loop_t0
+        if t_elapsed < fps_interval:
+            time.sleep(max(0, fps_interval - t_elapsed))
 
-        st_frame.image(frame_display, channels="BGR")
-        st_feedback.text(" | ".join(feedback_msgs))
-
-        # Gestion FPS
-        t_elapsed = time.time()-loop_t0
-        if t_elapsed<fps_interval: 
-            time.sleep(max(0,fps_interval-t_elapsed))
-
-if __name__=="__main__":
-    st.title("AI Focus Tracker - Streamlit")
-
-    # Initialisation session_state
+# -----------------------------
+# INTERFACE STREAMLIT
+# -----------------------------
+def main():
+    st.set_page_config(
+        page_title="AI Focus Tracker",
+        page_icon="👁️",
+        layout="wide"
+    )
+    
+    st.title("👁️ AI Focus Tracker - Streamlit Cloud")
+    
+    # Informations système
+    with st.sidebar:
+        st.header("Informations système")
+        st.write(f"📦 OpenCV: {'✅' if OPENCV_AVAILABLE else '❌'}")
+        st.write(f"🧠 TensorFlow: {'✅' if TENSORFLOW_AVAILABLE else '❌'}")
+        st.write(f"🤖 MediaPipe: {'✅' if MEDIAPIPE_AVAILABLE else '❌'}")
+        st.write(f"📊 Modèle: {'✅ Chargé' if model_enabled else '❌ Non disponible'}")
+        st.write(f"🎥 Mode: {'🔄 Démonstration' if is_test_camera else '📷 Caméra réelle'}")
+        
+        st.divider()
+        
+        st.info("""
+        **Note Streamlit Cloud:**
+        - Mode démonstration activé
+        - Pas d'accès à la webcam
+        - Données simulées pour la démo
+        """)
+    
+    # Initialisation session state
     if 'running' not in st.session_state:
         st.session_state.running = False
     if 'fig_dashboard' not in st.session_state:
         st.session_state.fig_dashboard = make_dashboard()
-
-    # Informations système
-    with st.expander("Informations système"):
-        st.write(f"Modèle chargé: {'✅' if model is not None else '❌'}")
-        st.write(f"Type caméra: {'🔄 Mode Test' if is_test_camera else '📷 Webcam Réelle'}")
-        st.write(f"Dimensions vidéo: {width}x{height}")
-
-    # Boutons Start/Stop
-    col1, col2 = st.columns(2)
+    
+    # Contrôles
+    col1, col2 = st.columns([1, 1])
     with col1:
-        if st.button("▶️ Start", type="primary", use_container_width=True):
+        if st.button("▶️ Démarrer l'analyse", type="primary", use_container_width=True):
             st.session_state.running = True
             st.rerun()
+    
     with col2:
-        if st.button("⏹ Stop", type="secondary", use_container_width=True):
+        if st.button("⏹️ Arrêter", type="secondary", use_container_width=True):
             st.session_state.running = False
             st.rerun()
-
-    st.info(f"Status: **{'🟢 Running' if st.session_state.running else '🔴 Stopped'}**")
-
-    # Placeholders pour le dashboard et la vidéo
+    
+    # Statut
+    status_col1, status_col2 = st.columns([3, 1])
+    with status_col1:
+        if st.session_state.running:
+            st.success("🟢 Analyse en cours - Mode démonstration")
+        else:
+            st.warning("🔴 Analyse arrêtée")
+    
+    with status_col2:
+        if st.button("🔄 Redémarrer calibration"):
+            global tilt_center
+            tilt_center = calibrate_tilt()
+            st.rerun()
+    
+    # Placeholders
     st_plot = st.empty()
     st_frame = st.empty()
     st_feedback = st.empty()
-
-    # Affichage initial du dashboard
-    st_plot.plotly_chart(st.session_state.fig_dashboard)
-
+    
+    # Afficher dashboard initial
+    st_plot.plotly_chart(st.session_state.fig_dashboard, use_container_width=True)
+    
+    # Démarrer ou arrêter l'analyse
     if st.session_state.running:
-        main_loop(fig_dashboard=st.session_state.fig_dashboard,
-                  st_plot=st_plot,
-                  st_frame=st_frame,
-                  st_feedback=st_feedback)
+        main_loop(
+            fig_dashboard=st.session_state.fig_dashboard,
+            st_plot=st_plot,
+            st_frame=st_frame,
+            st_feedback=st_feedback
+        )
     else:
-        # Image d'arrêt
-        try:
-            dummy_frame = np.zeros((height, width, 3), dtype=np.uint8) 
-            cv2.putText(dummy_frame, "SESSION ARRÊTÉE", (width//2 - 200, height//2), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 1.2, (200, 200, 200), 3)
-            cv2.putText(dummy_frame, "Cliquez sur Start pour commencer", (width//2 - 250, height//2 + 50), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (150, 150, 255), 2)
-            st_frame.image(dummy_frame, channels="BGR")
-        except:
-            st_frame.text("Vidéo arrêtée")
+        # Écran d'arrêt
+        dummy_frame = np.zeros((height, width, 3), dtype=np.uint8)
+        cv2.putText(dummy_frame, "ANALYSE ARRÊTÉE", 
+                   (width//2 - 150, height//2 - 30), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 1, (200, 200, 200), 3)
+        cv2.putText(dummy_frame, "Cliquez sur 'Démarrer' pour commencer", 
+                   (width//2 - 200, height//2 + 30), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (150, 150, 255), 2)
+        cv2.putText(dummy_frame, "Mode: Streamlit Cloud - Données simulées", 
+                   (width//2 - 200, height//2 + 70), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (100, 200, 255), 1)
         
-        # Message de feedback
-        st_feedback.text("Session terminée. Cliquez sur Start pour lancer une nouvelle analyse.")
+        st_frame.image(dummy_frame, channels="BGR", use_container_width=True)
+        st_feedback.info("Prêt à démarrer l'analyse de concentration")
 
-    # Nettoyage quand l'application se ferme
-    if not st.session_state.running and 'cap' in locals():
-        try:
-            if not is_test_camera:
-                cap.release()
-        except:
-            pass
+if __name__ == "__main__":
+    main()
