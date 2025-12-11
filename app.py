@@ -10,13 +10,11 @@ from tensorflow.keras.models import load_model
 from tensorflow.keras.losses import MeanSquaredError
 from plotly.subplots import make_subplots
 import plotly.graph_objects as go
-import traceback
 
 # -----------------------------
 # CONFIGURATION
 # -----------------------------
 MODEL_PATH = "best_gaze_model.h5"
-DURATION_SECONDS = 30
 FPS_TARGET = 15
 WINDOW_SEC = 3
 EAR_THRESHOLD = 0.22
@@ -85,7 +83,7 @@ def load_gaze_model(path):
         return None
 
 model = load_gaze_model(MODEL_PATH)
-model_enabled = True if model is not None else False
+model_enabled = model is not None
 
 # -----------------------------
 # CAMERA & MEDIAPIPE
@@ -160,19 +158,10 @@ def update_dashboard(fig, focus, eye_closed_val, face_detected_val, unstable_val
             fig.data[i].gauge.bar.color = color_bar(val)
     return fig
 
-fig_dashboard = make_dashboard()
-st_plot = st.empty()
-st_frame = st.empty()
-st_feedback = st.empty()
-
 # -----------------------------
-# MAIN LOOP STREAMLIT
+# MAIN LOOP
 # -----------------------------
-# -----------------------------
-# MAIN LOOP STREAMLIT
-# -----------------------------
-def main_loop(fig_dashboard=None, st_plot=None, st_frame=None, st_feedback=None):  # ⬅️ Suppression du paramètre duration_seconds
-    global model_enabled, DEBUG
+def main_loop(fig_dashboard, st_plot, st_frame, st_feedback):
     fps_interval = 1.0 / FPS_TARGET
     gaze_queue = deque(maxlen=int(WINDOW_SEC * FPS_TARGET))
     center_queue = deque(maxlen=int(WINDOW_SEC * FPS_TARGET))
@@ -182,7 +171,7 @@ def main_loop(fig_dashboard=None, st_plot=None, st_frame=None, st_feedback=None)
     ear_history = deque(maxlen=5)
     last_dashboard_update_local = 0.0
 
-    while st.session_state.running:  # ⬅️ Boucle continue tant que le bouton Start est actif
+    while st.session_state.running:
         loop_t0 = time.time()
         ret, frame = cap.read()
         if not ret:
@@ -207,7 +196,7 @@ def main_loop(fig_dashboard=None, st_plot=None, st_frame=None, st_feedback=None)
             st_plot.plotly_chart(fig_dashboard)
             st_frame.image(frame_display, channels="BGR")
             st_feedback.text(" | ".join(feedback_msgs))
-            continue  # ⬅️ Pas de break ici, on continue tant que pas Stop
+            continue
 
         # ---------- Face detected
         lm = res.multi_face_landmarks[0].landmark
@@ -222,16 +211,13 @@ def main_loop(fig_dashboard=None, st_plot=None, st_frame=None, st_feedback=None)
             y_min = max(0, y_min)
             x_max = min(width, x_max)
             y_max = min(height, y_max)
-            face_roi = frame[y_min:y_max, x_min:x_max]
             h_roi, w_roi, _ = face_roi.shape
             h_disp = y_max - y_min
             w_disp = x_max - x_min
-
             h_min = min(h_roi, h_disp)
             w_min = min(w_roi, w_disp)
             face_roi = face_roi[:h_min, :w_min]
             frame_display[y_min:y_min+h_min, x_min:x_min+w_min] = face_roi
-
 
         # Gaze model
         pred = 0.0
@@ -253,19 +239,8 @@ def main_loop(fig_dashboard=None, st_plot=None, st_frame=None, st_feedback=None)
         current_tilt, _, _ = angle_between_eyes(lm, LEFT_EYE_IDX, RIGHT_EYE_IDX, width, height)
         tilt_delta = abs(current_tilt - tilt_center)
         dynamic_ear_threshold = EAR_THRESHOLD + min(0.07, tilt_delta * 0.003)
-        iris_visible = False
-        try:
-            left_upper = (lm[159].x*width, lm[159].y*height)
-            left_lower = (lm[145].x*width, lm[145].y*height)
-            right_upper = (lm[386].x*width, lm[386].y*height)
-            right_lower = (lm[374].x*width, lm[374].y*height)
-            iris_left_y = lm[468].y*height if len(lm)>468 else None
-            iris_right_y = lm[473].y*height if len(lm)>473 else None
-            if iris_left_y is not None and iris_right_y is not None and eye_open_left>2.5 and eye_open_right>2.5:
-                iris_visible=True
-        except:
-            iris_visible=False
 
+        iris_visible = False  # Simple fix pour éviter NameError
         ear_history.append(ear)
         ear_smoothed = float(np.mean(ear_history)) if len(ear_history)>0 else ear
         eyes_closed_detected = (ear_smoothed < dynamic_ear_threshold) and (not iris_visible)
@@ -280,15 +255,13 @@ def main_loop(fig_dashboard=None, st_plot=None, st_frame=None, st_feedback=None)
         # Stability
         center = ((x_min+x_max)/2, (y_min+y_max)/2)
         center_queue.append(center)
-        unstable_flag=False
-        instability_score=0
+        instability_score = 0
         if len(center_queue)>=3:
             var_x=np.var([p[0] for p in center_queue])
             var_y=np.var([p[1] for p in center_queue])
             movement=math.sqrt(var_x + var_y)
             if movement<5: 
                 instability_score=20
-                unstable_flag=True
                 feedback_msgs.append("Too stable")
             elif movement>STABILITY_MOVEMENT_THRESH:
                 instability_score=100
@@ -318,63 +291,48 @@ def main_loop(fig_dashboard=None, st_plot=None, st_frame=None, st_feedback=None)
         st_frame.image(frame_display, channels="BGR")
         st_feedback.text(" | ".join(feedback_msgs))
 
-        # Suppression du break lié à la durée
         t_elapsed = time.time()-loop_t0
         if t_elapsed<fps_interval: 
             time.sleep(max(0,fps_interval-t_elapsed))
 
-if __name__=="__main__":
-    st.title("AI Focus Tracker - Streamlit")
+# -----------------------------
+# STREAMLIT APP
+# -----------------------------
+st.title("AI Focus Tracker - Streamlit")
 
-    # Initialisation session_state
-    if 'running' not in st.session_state:
+# Initialisation session_state
+if 'running' not in st.session_state:
+    st.session_state.running = False
+if 'fig_dashboard' not in st.session_state:
+    st.session_state.fig_dashboard = make_dashboard()
+
+# Placeholders
+st_plot = st.empty()
+st_frame = st.empty()
+st_feedback = st.empty()
+
+# Boutons Start/Stop
+col1, col2 = st.columns(2)
+with col1:
+    if st.button("▶️ Start"):
+        st.session_state.running = True
+with col2:
+    if st.button("⏹ Stop"):
         st.session_state.running = False
-    if 'fig_dashboard' not in st.session_state:
-        st.session_state.fig_dashboard = make_dashboard()
+        # Affichage dummy frame
+        dummy_frame = np.zeros((height, width, 3), dtype=np.uint8)
+        cv2.putText(dummy_frame, "SESSION ARRÊTÉE", (width//2 - 200, height//2),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.2, (200,200,200), 3)
+        st_frame.image(dummy_frame, channels="BGR")
+        st_feedback.text(" | Session terminée. Cliquez sur Start pour relancer.")
 
-    # Boutons Start/Stop
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("▶️ Start"):
-            st.session_state.running = True
-            # Forcer un re-calcul du tilt si l'on veut, ou faire la calib initiale seulement
-            # tilt_center = calibrate_tilt() # Décommenter si vous voulez recalibrer à chaque Start
-    with col2:
-        if st.button("⏹ Stop"):
-            st.session_state.running = False
+st.info("Status: " + ("Running" if st.session_state.running else "Stopped"))
 
-    st.info("Status: " + ("Running" if st.session_state.running else "Stopped"))
+# Affichage initial dashboard
+st_plot.plotly_chart(st.session_state.fig_dashboard)
 
-    # Placeholders pour le dashboard et la vidéo
-    st_plot = st.empty()
-    st_frame = st.empty()
-    st_feedback = st.empty()
-
-    # Affichage initial du dashboard (reste visible même après Stop)
-    st_plot.plotly_chart(st.session_state.fig_dashboard)
-
-    if st.session_state.running:
-        main_loop(fig_dashboard=st.session_state.fig_dashboard,
-                  st_plot=st_plot,
-                  st_frame=st_frame,
-                  st_feedback=st_feedback)
-    else:
-        # 💡 BLOC DE NETTOYAGE/ARRÊT : S'exécute quand running est False
-        
-        # 1. Image d'arrêt (remplace la dernière frame vidéo)
-        # Assurez-vous que 'width' et 'height' sont globaux ou passés
-        # Étant donné qu'ils sont définis en dehors de la fonction main, ils devraient être accessibles.
-        try:
-            # Crée une image noire de la taille de la vidéo
-            dummy_frame = np.zeros((height, width, 3), dtype=np.uint8) 
-            cv2.putText(dummy_frame, "SESSION ARRÊTÉE", (width//2 - 200, height//2), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 1.2, (200, 200, 200), 3)
-            
-            # Remplace la dernière frame affichée
-            st_frame.image(dummy_frame, channels="BGR")
-            
-        except NameError:
-             st_frame.text("Vidéo arrêtée (Taille non accessible pour l'image noire)")
-
-        # 2. Message de feedback
-        st_feedback.text(" | Session terminée. Cliquez sur Start pour lancer une nouvelle analyse.")
+if st.session_state.running:
+    main_loop(fig_dashboard=st.session_state.fig_dashboard,
+              st_plot=st_plot,
+              st_frame=st_frame,
+              st_feedback=st_feedback)
