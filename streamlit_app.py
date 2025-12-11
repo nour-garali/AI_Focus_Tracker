@@ -10,6 +10,8 @@ from tensorflow.keras.models import load_model
 from tensorflow.keras.losses import MeanSquaredError
 from plotly.subplots import make_subplots
 import plotly.graph_objects as go
+from streamlit_webrtc import webrtc_streamer, VideoTransformerBase, WebRtcMode
+import av
 
 # -----------------------------
 # CONFIGURATION
@@ -21,8 +23,7 @@ EAR_THRESHOLD = 0.22
 EYE_CLOSED_CONSEC_FRAMES = 3
 STABILITY_MOVEMENT_THRESH = 25
 PRIVACY_BLUR = True
-CALIBRATION_FRAMES = 50
-DASHBOARD_UPDATE_INTERVAL = 0.5
+CALIBRATION_FRAMES = 30
 
 LEFT_EYE_IDX = [33, 160, 158, 133, 153, 144]
 RIGHT_EYE_IDX = [362, 385, 387, 263, 373, 380]
@@ -71,58 +72,15 @@ def color_bar(val):
 # -----------------------------
 # LOAD MODEL
 # -----------------------------
+@st.cache_resource
 def load_gaze_model(path):
     try:
         model_local = load_model(path, custom_objects={'mse': MeanSquaredError()})
         st.success("✅ Modèle gaze chargé.")
         return model_local
     except Exception as e:
-        st.warning(f"❌ Erreur chargement modèle : {e}. Model désactivé.")
+        st.warning(f"❌ Erreur chargement modèle : {e}. Utilisation du mode simulé.")
         return None
-
-model = load_gaze_model(MODEL_PATH)
-model_enabled = model is not None
-
-# -----------------------------
-# CAMERA & MEDIAPIPE
-# -----------------------------
-cap = cv2.VideoCapture(0)
-if not cap.isOpened():
-    st.error("Impossible d'ouvrir la caméra")
-    st.stop()
-
-width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-
-mp_face_mesh = mp.solutions.face_mesh
-face_mesh = mp_face_mesh.FaceMesh(static_image_mode=False, max_num_faces=1,
-                                  refine_landmarks=True, min_detection_confidence=0.5,
-                                  min_tracking_confidence=0.5)
-
-# -----------------------------
-# CALIBRATION TILT
-# -----------------------------
-def calibrate_tilt(frames=CALIBRATION_FRAMES):
-    st.info("🔹 Calibration tilt...")
-    tilt_values = []
-    count = 0
-    while count < frames:
-        ret, frame = cap.read()
-        if not ret:
-            continue
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        res = face_mesh.process(rgb)
-        if not res.multi_face_landmarks:
-            continue
-        lm = res.multi_face_landmarks[0].landmark
-        tilt, _, _ = angle_between_eyes(lm, LEFT_EYE_IDX, RIGHT_EYE_IDX, width, height)
-        tilt_values.append(tilt)
-        count += 1
-    center = float(np.mean(tilt_values)) if tilt_values else 0.0
-    st.success(f"✅ Calibration terminée. Tilt_center={center:.2f}")
-    return center
-
-tilt_center = calibrate_tilt()
 
 # -----------------------------
 # DASHBOARD
@@ -139,9 +97,9 @@ def make_dashboard():
                                    gauge={'axis':{'range':[0,100]},
                                           'bar':{'color':'green'}}),
                       row=(i//2)+1, col=(i%2)+1)
-    fig.update_layout(height=700, width=900, paper_bgcolor='#2b3e5c', plot_bgcolor='#2b3e5c',
+    fig.update_layout(height=500, width=700, paper_bgcolor='#2b3e5c', plot_bgcolor='#2b3e5c',
                       title_text="Dashboard Concentration Live", title_x=0.5,
-                      font=dict(color="white", size=14))
+                      font=dict(color="white", size=12))
     return fig
 
 def update_dashboard(fig, focus, eye_closed_val, face_detected_val, unstable_val):
@@ -154,176 +112,302 @@ def update_dashboard(fig, focus, eye_closed_val, face_detected_val, unstable_val
     return fig
 
 # -----------------------------
-# STREAMLIT APP
+# CLASSE DE TRANSFORMATION VIDÉO
 # -----------------------------
-st.title("AI Focus Tracker - Streamlit")
+class FaceAnalyzerTransformer(VideoTransformerBase):
+    def __init__(self):
+        self.mp_face_mesh = mp.solutions.face_mesh
+        self.face_mesh = self.mp_face_mesh.FaceMesh(
+            static_image_mode=False, 
+            max_num_faces=1,
+            refine_landmarks=True, 
+            min_detection_confidence=0.5,
+            min_tracking_confidence=0.5
+        )
+        
+        self.model = load_gaze_model(MODEL_PATH)
+        self.model_enabled = self.model is not None
+        
+        # Initialisation des états
+        self.gaze_queue = deque(maxlen=45)  # 3 sec * 15 FPS
+        self.center_queue = deque(maxlen=15)
+        self.consecutive_eye_closed = 0
+        self.ear_history = deque(maxlen=5)
+        self.tilt_center = 0.0
+        self.calibrated = False
+        self.calibration_counter = 0
+        self.calibration_values = []
+        
+        # Compteurs
+        self.counters = {
+            "center_gaze": 0, "left": 0, "right": 0,
+            "eye_closed": 0, "head_tilt": 0, "unstable": 0, 
+            "total": 0, "no_face": 0
+        }
+        
+        self.feedback_msgs = []
+        self.focus_value = 0
+        self.eye_closed_val = 0
+        self.face_detected_val = 0
+        self.unstable_val = 0
 
-# Session state
-if 'running' not in st.session_state:
-    st.session_state.running = False
-if 'fig_dashboard' not in st.session_state:
-    st.session_state.fig_dashboard = make_dashboard()
+    def calibrate_tilt(self, landmarks, width, height):
+        if self.calibration_counter < CALIBRATION_FRAMES:
+            tilt, _, _ = angle_between_eyes(landmarks, LEFT_EYE_IDX, RIGHT_EYE_IDX, width, height)
+            self.calibration_values.append(tilt)
+            self.calibration_counter += 1
+            return False
+        
+        if not self.calibrated and self.calibration_values:
+            self.tilt_center = float(np.mean(self.calibration_values))
+            self.calibrated = True
+            st.success(f"✅ Calibration terminée. Tilt_center={self.tilt_center:.2f}")
+        return True
 
-# Boutons Start/Stop
-col1, col2 = st.columns(2)
-with col1:
-    if st.button("▶️ Start"):
-        st.session_state.running = True
-with col2:
-    if st.button("⏹ Stop"):
-        st.session_state.running = False
-
-st.info("Status: " + ("Running" if st.session_state.running else "Stopped"))
-
-# Placeholders
-st_plot = st.empty()
-st_frame = st.empty()
-st_feedback = st.empty()
-st_plot.plotly_chart(st.session_state.fig_dashboard)
-
-# -----------------------------
-# MAIN LOOP OPTIMIZED
-# -----------------------------
-def main_loop():
-    fps_interval = 1.0 / FPS_TARGET
-    gaze_queue = deque(maxlen=int(WINDOW_SEC * FPS_TARGET))
-    center_queue = deque(maxlen=int(WINDOW_SEC * FPS_TARGET))
-    consecutive_eye_closed = 0
-    counters = {"center_gaze":0, "left":0, "right":0,
-                "eye_closed":0, "head_tilt":0, "unstable":0, "total":0, "no_face":0}
-    ear_history = deque(maxlen=5)
-    last_dashboard_update = 0
-
-    frame_count = 0
-
-    while st.session_state.running:
-        loop_t0 = time.time()
-        ret, frame = cap.read()
-        if not ret:
-            continue
-        frame_count += 1
-        counters["total"] += 1
-        frame_display = cv2.GaussianBlur(frame,(51,51),0) if PRIVACY_BLUR else frame.copy()
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        res = face_mesh.process(rgb)
-        feedback_msgs = []
-
-        # ----------- No face
-        if not res.multi_face_landmarks:
-            counters["no_face"] += 1
-            counters["eye_closed"] +=1
-            eye_closed_val = min(100,(counters["eye_closed"]/counters["total"])*100)
-            face_detected_val = min(100,((counters["total"]-counters["no_face"])/counters["total"])*100)
-            unstable_val = 0
-            focus = 0
-            gaze_queue.append(0)
-            feedback_msgs.append("No face detected")
-        else:
-            lm = res.multi_face_landmarks[0].landmark
-            xs_all = [lm[i].x*width for i in range(len(lm))]
-            ys_all = [lm[i].y*height for i in range(len(lm))]
-            x_min, y_min = max(0,int(min(xs_all)-10)), max(0,int(min(ys_all)-10))
-            x_max, y_max = min(width-1,int(max(xs_all)+10)), min(height-1,int(max(ys_all)+10))
-            face_roi = frame[y_min:y_max, x_min:x_max]
-
+    def transform(self, frame):
+        try:
+            img = frame.to_ndarray(format="bgr24")
+            height, width = img.shape[:2]
+            
+            # Copie pour affichage
+            display_img = img.copy()
             if PRIVACY_BLUR:
-                h_roi, w_roi, _ = face_roi.shape
-                h_disp = y_max - y_min
-                w_disp = x_max - x_min
-                h_min = min(h_roi, h_disp)
-                w_min = min(w_roi, w_disp)
-                face_roi = face_roi[:h_min, :w_min]
-                frame_display[y_min:y_min+h_min, x_min:x_min+w_min] = face_roi
-
-            # Gaze
-            pred = 0.0
-            if model_enabled:
-                try:
-                    img = cv2.resize(face_roi,(64,64))/255.0
-                    pred = float(model.predict(np.expand_dims(img,0), verbose=0)[0][0])
-                except:
-                    pred = 0.0
-            if pred > 0.5: gaze = "RIGHT"; counters["right"] += 1
-            elif pred < -0.5: gaze = "LEFT"; counters["left"] += 1
-            else: gaze = "CENTER"; counters["center_gaze"] += 1
-            gaze_queue.append(pred)
-
-            # Eyes
-            ear_left = eye_aspect_ratio(lm, LEFT_EYE_IDX, width, height)
-            ear_right = eye_aspect_ratio(lm, RIGHT_EYE_IDX, width, height)
-            ear = (ear_left + ear_right)/2.0
-            current_tilt, _, _ = angle_between_eyes(lm, LEFT_EYE_IDX, RIGHT_EYE_IDX, width, height)
-            tilt_delta = abs(current_tilt - tilt_center)
-            dynamic_ear_threshold = EAR_THRESHOLD + min(0.07, tilt_delta * 0.003)
-            ear_history.append(ear)
-            ear_smoothed = float(np.mean(ear_history))
-            eyes_closed_detected = (ear_smoothed < dynamic_ear_threshold)
-            if eyes_closed_detected:
-                consecutive_eye_closed += 1
+                display_img = cv2.GaussianBlur(display_img, (51, 51), 0)
+            
+            self.feedback_msgs = []
+            self.counters["total"] += 1
+            
+            # Traitement avec MediaPipe
+            rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            res = self.face_mesh.process(rgb)
+            
+            if not res.multi_face_landmarks:
+                self.counters["no_face"] += 1
+                self.counters["eye_closed"] += 1
+                self.feedback_msgs.append("Pas de visage détecté")
+                gaze = "AUCUN"
             else:
-                consecutive_eye_closed = 0
-            eye_closed_flag = (consecutive_eye_closed >= EYE_CLOSED_CONSEC_FRAMES)
-            if eye_closed_flag:
-                counters["eye_closed"] += 1
-                feedback_msgs.append("Eyes Closed")
-
-            # Stability
-            center = ((x_min+x_max)/2, (y_min+y_max)/2)
-            center_queue.append(center)
-            unstable_val = 0
-            if len(center_queue)>=3:
-                var_x=np.var([p[0] for p in center_queue])
-                var_y=np.var([p[1] for p in center_queue])
-                movement=math.sqrt(var_x + var_y)
-                if movement<5: 
-                    unstable_val=20
-                    feedback_msgs.append("Too stable")
-                elif movement>STABILITY_MOVEMENT_THRESH:
-                    unstable_val=100
+                lm = res.multi_face_landmarks[0].landmark
+                
+                # Calibration si nécessaire
+                if not self.calibrated:
+                    if self.calibrate_tilt(lm, width, height):
+                        # Dessiner le message de calibration
+                        cv2.putText(display_img, "CALIBRATION EN COURS...", 
+                                   (width//2 - 150, height//2),
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+                        return display_img
+                
+                # Extraction ROI du visage
+                xs_all = [lm[i].x * width for i in range(len(lm))]
+                ys_all = [lm[i].y * height for i in range(len(lm))]
+                x_min, y_min = max(0, int(min(xs_all) - 10)), max(0, int(min(ys_all) - 10))
+                x_max, y_max = min(width - 1, int(max(xs_all) + 10)), min(height - 1, int(max(ys_all) + 10))
+                
+                # Détection du regard
+                pred = 0.0
+                if self.model_enabled and x_max > x_min and y_max > y_min:
+                    try:
+                        face_roi = img[y_min:y_max, x_min:x_max]
+                        if face_roi.size > 0:
+                            img_resized = cv2.resize(face_roi, (64, 64)) / 255.0
+                            pred = float(self.model.predict(np.expand_dims(img_resized, 0), verbose=0)[0][0])
+                    except:
+                        pred = 0.0
+                
+                # Détermination de la direction du regard
+                if pred > 0.5: 
+                    gaze = "DROITE"
+                    self.counters["right"] += 1
+                elif pred < -0.5: 
+                    gaze = "GAUCHE"
+                    self.counters["left"] += 1
+                else: 
+                    gaze = "CENTRE"
+                    self.counters["center_gaze"] += 1
+                
+                self.gaze_queue.append(pred)
+                
+                # Calcul EAR (Eye Aspect Ratio)
+                ear_left = eye_aspect_ratio(lm, LEFT_EYE_IDX, width, height)
+                ear_right = eye_aspect_ratio(lm, RIGHT_EYE_IDX, width, height)
+                ear = (ear_left + ear_right) / 2.0
+                self.ear_history.append(ear)
+                ear_smoothed = float(np.mean(self.ear_history))
+                
+                # Détection yeux fermés
+                current_tilt, _, _ = angle_between_eyes(lm, LEFT_EYE_IDX, RIGHT_EYE_IDX, width, height)
+                tilt_delta = abs(current_tilt - self.tilt_center)
+                dynamic_ear_threshold = EAR_THRESHOLD + min(0.07, tilt_delta * 0.003)
+                
+                if ear_smoothed < dynamic_ear_threshold:
+                    self.consecutive_eye_closed += 1
                 else:
-                    unstable_val=int((movement/STABILITY_MOVEMENT_THRESH)*100)
-
-            # Focus calculation
-            gaze_focus_smoothed = np.mean([1 if abs(g)<0.5 else 0 for g in gaze_queue])*100
-            eye_closed_val = min(100,(counters["eye_closed"]/counters["total"])*100)
-            face_detected_val = min(100,((counters["total"]-counters["no_face"])/counters["total"])*100)
-            focus = (0.4*gaze_focus_smoothed + 0.2*(100-eye_closed_val) + 0.2*face_detected_val +0.2*(100-unstable_val))
-            focus = max(0.0, min(100.0, focus))
-
-            # Draw feedback on frame
-            cv2.rectangle(frame_display, (x_min,y_min), (x_max,y_max), (0,255,0), 2)
-            cv2.putText(frame_display,f"Gaze:{gaze} (Model {'ON' if model_enabled else 'OFF'})",(10,30),
-                        cv2.FONT_HERSHEY_SIMPLEX,0.7,(0,255,0),2)
-            for idx,msg in enumerate(feedback_msgs):
-                cv2.putText(frame_display,msg,(10,60+30*idx),cv2.FONT_HERSHEY_SIMPLEX,0.7,(0,0,255),2)
-
-        # -------------------------
-        # Update dashboard every DASHBOARD_UPDATE_INTERVAL
-        # -------------------------
-        if time.time() - last_dashboard_update > DASHBOARD_UPDATE_INTERVAL:
-            update_dashboard(st.session_state.fig_dashboard, round(focus,2), round(eye_closed_val,2), round(face_detected_val,2), round(unstable_val,2))
-            st_plot.plotly_chart(st.session_state.fig_dashboard)
-            last_dashboard_update = time.time()
-
-        # Update frame & feedback every 2 frames
-        if frame_count % 2 == 0:
-            st_frame.image(frame_display, channels="BGR")
-            st_feedback.text(" | ".join(feedback_msgs))
-
-        # Control FPS
-        t_elapsed = time.time()-loop_t0
-        if t_elapsed < fps_interval:
-            time.sleep(fps_interval - t_elapsed)
+                    self.consecutive_eye_closed = 0
+                
+                if self.consecutive_eye_closed >= EYE_CLOSED_CONSEC_FRAMES:
+                    self.counters["eye_closed"] += 1
+                    self.feedback_msgs.append("Yeux fermés")
+                
+                # Calcul stabilité
+                center = ((x_min + x_max) / 2, (y_min + y_max) / 2)
+                self.center_queue.append(center)
+                
+                if len(self.center_queue) >= 3:
+                    var_x = np.var([p[0] for p in self.center_queue])
+                    var_y = np.var([p[1] for p in self.center_queue])
+                    movement = math.sqrt(var_x + var_y)
+                    
+                    if movement < 5:
+                        self.unstable_val = 20
+                        self.feedback_msgs.append("Trop stable")
+                    elif movement > STABILITY_MOVEMENT_THRESH:
+                        self.unstable_val = 100
+                        self.feedback_msgs.append("Trop mouvementé")
+                    else:
+                        self.unstable_val = int((movement / STABILITY_MOVEMENT_THRESH) * 100)
+                
+                # Calcul focus
+                gaze_focus_smoothed = np.mean([1 if abs(g) < 0.5 else 0 for g in self.gaze_queue]) * 100
+                self.eye_closed_val = min(100, (self.counters["eye_closed"] / self.counters["total"]) * 100)
+                self.face_detected_val = min(100, ((self.counters["total"] - self.counters["no_face"]) / self.counters["total"]) * 100)
+                
+                self.focus_value = (0.4 * gaze_focus_smoothed + 
+                                   0.2 * (100 - self.eye_closed_val) + 
+                                   0.2 * self.face_detected_val + 
+                                   0.2 * (100 - self.unstable_val))
+                self.focus_value = max(0.0, min(100.0, self.focus_value))
+                
+                # Dessiner sur l'image
+                cv2.rectangle(display_img, (x_min, y_min), (x_max, y_max), (0, 255, 0), 2)
+                cv2.putText(display_img, f"Regard: {gaze}", (10, 30),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                cv2.putText(display_img, f"Focus: {self.focus_value:.1f}%", (10, 60),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                
+                # Ajouter les messages de feedback
+                for idx, msg in enumerate(self.feedback_msgs):
+                    cv2.putText(display_img, msg, (10, 90 + 30 * idx),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+            
+            return display_img
+            
+        except Exception as e:
+            st.error(f"Erreur dans transform: {e}")
+            return frame.to_ndarray(format="bgr24")
 
 # -----------------------------
-# LANCEMENT DU MAIN LOOP
+# INTERFACE STREAMLIT
 # -----------------------------
-if st.session_state.running:
-    main_loop()
-else:
-    # Affichage image session arrêtée
-    dummy_frame = np.zeros((height, width, 3), dtype=np.uint8)
-    cv2.putText(dummy_frame, "SESSION ARRÊTÉE", (width//2 - 200, height//2),
-                cv2.FONT_HERSHEY_SIMPLEX, 1.2, (200, 200, 200), 3)
-    st_frame.image(dummy_frame, channels="BGR")
-    st_feedback.text(" | Session terminée. Cliquez sur Start pour lancer une nouvelle analyse.")
+st.set_page_config(page_title="AI Focus Tracker", layout="wide")
+
+st.title("🧠 AI Focus Tracker - Surveillance de Concentration")
+
+# Section informations
+with st.expander("ℹ️ À propos de cette application"):
+    st.write("""
+    Cette application analyse votre concentration en temps réel en utilisant :
+    - **Détection du regard** (via modèle d'IA)
+    - **Ouverture des yeux** (EAR - Eye Aspect Ratio)
+    - **Stabilité du visage**
+    - **Position de la tête**
+    
+    🔒 **Confidentialité** : L'analyse se fait localement, aucune donnée n'est enregistrée.
+    """)
+
+# Initialisation du state
+if 'transformer' not in st.session_state:
+    st.session_state.transformer = None
+
+if 'dashboard_fig' not in st.session_state:
+    st.session_state.dashboard_fig = make_dashboard()
+
+# Layout
+col1, col2 = st.columns([2, 1])
+
+with col1:
+    st.subheader("📹 Flux Vidéo Live")
+    
+    # Création du transformer
+    if st.session_state.transformer is None:
+        st.session_state.transformer = FaceAnalyzerTransformer()
+    
+    # Configuration WebRTC
+    ctx = webrtc_streamer(
+        key="face-analysis",
+        mode=WebRtcMode.SENDRECV,
+        rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
+        video_transformer_factory=lambda: st.session_state.transformer,
+        media_stream_constraints={"video": True, "audio": False},
+        async_transform=True,
+    )
+    
+    if ctx.state.playing:
+        st.success("✅ Caméra activée - Analyse en cours")
+    else:
+        st.warning("⏸️ Cliquez sur 'START' ci-dessous pour démarrer la caméra")
+        st.image("https://via.placeholder.com/640x480/2b3e5c/ffffff?text=En+attente+de+la+cam%C3%A9ra", 
+                caption="En attente de la caméra")
+
+with col2:
+    st.subheader("📊 Dashboard de Concentration")
+    
+    # Affichage des métriques
+    if st.session_state.transformer:
+        transformer = st.session_state.transformer
+        
+        # Mise à jour du dashboard
+        update_dashboard(
+            st.session_state.dashboard_fig,
+            transformer.focus_value,
+            transformer.eye_closed_val,
+            transformer.face_detected_val,
+            transformer.unstable_val
+        )
+        
+        st.plotly_chart(st.session_state.dashboard_fig, use_container_width=True)
+        
+        # Statistiques textuelles
+        st.metric("Focus Actuel", f"{transformer.focus_value:.1f}%")
+        
+        with st.expander("📈 Détails des statistiques"):
+            col_a, col_b = st.columns(2)
+            with col_a:
+                st.metric("Regard Centre", f"{transformer.counters.get('center_gaze', 0)}")
+                st.metric("Yeux Fermés", f"{transformer.counters.get('eye_closed', 0)}")
+            with col_b:
+                st.metric("Regard Gauche", f"{transformer.counters.get('left', 0)}")
+                st.metric("Regard Droite", f"{transformer.counters.get('right', 0)}")
+        
+        # Messages de feedback
+        if transformer.feedback_msgs:
+            st.warning("⚠️ **Alertes** : " + " | ".join(transformer.feedback_msgs))
+        else:
+            st.success("✅ Bonne concentration détectée")
+
+# Section contrôle
+st.sidebar.title("⚙️ Contrôles")
+
+if st.sidebar.button("🔄 Réinitialiser l'analyse"):
+    st.session_state.transformer = FaceAnalyzerTransformer()
+    st.session_state.dashboard_fig = make_dashboard()
+    st.rerun()
+
+# Paramètres
+st.sidebar.subheader("Paramètres")
+PRIVACY_BLUR = st.sidebar.toggle("Floutage de confidentialité", value=True)
+EAR_THRESHOLD = st.sidebar.slider("Seuil yeux fermés", 0.1, 0.3, 0.22, 0.01)
+STABILITY_THRESH = st.sidebar.slider("Seuil stabilité", 10, 50, 25, 5)
+
+# Instructions
+st.sidebar.subheader("📋 Instructions")
+st.sidebar.info("""
+1. Cliquez sur **START** dans le flux vidéo
+2. Autorisez l'accès à la caméra
+3. Placez-vous face à la caméra
+4. L'analyse démarre automatiquement après calibration
+""")
+
+# Pied de page
+st.sidebar.markdown("---")
+st.sidebar.caption("AI Focus Tracker v1.0 | Développé avec Streamlit & MediaPipe")
