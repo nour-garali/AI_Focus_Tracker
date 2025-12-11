@@ -5,6 +5,7 @@ import numpy as np
 import mediapipe as mp
 import math
 import time
+import os
 from collections import deque
 from tensorflow.keras.models import load_model
 from tensorflow.keras.losses import MeanSquaredError
@@ -15,6 +16,7 @@ import traceback
 # -----------------------------
 # CONFIGURATION
 # -----------------------------
+# CORRECTION : Vérifier si le fichier modèle existe
 MODEL_PATH = "best_gaze_model.h5"
 DURATION_SECONDS = 30
 FPS_TARGET = 15
@@ -73,10 +75,20 @@ def color_bar(val):
     else: return "red"
 
 # -----------------------------
-# LOAD MODEL
+# LOAD MODEL - VERSION CORRIGÉE
 # -----------------------------
 def load_gaze_model(path):
     try:
+        # CORRECTION : Vérifier d'abord si le fichier existe
+        if not os.path.exists(path):
+            st.warning(f"⚠️ Fichier modèle non trouvé : {path}. Utilisation sans modèle.")
+            st.info("Fichiers disponibles dans le dossier :")
+            try:
+                st.write(os.listdir("."))
+            except:
+                st.write("Impossible de lister les fichiers")
+            return None
+        
         model_local = load_model(path, custom_objects={'mse': MeanSquaredError()})
         st.success("✅ Modèle gaze chargé.")
         return model_local
@@ -88,16 +100,79 @@ model = load_gaze_model(MODEL_PATH)
 model_enabled = True if model is not None else False
 
 # -----------------------------
-# CAMERA & MEDIAPIPE
+# CAMERA & MEDIAPIPE - VERSION CORRIGÉE
 # -----------------------------
-cap = cv2.VideoCapture(0)
-if not cap.isOpened():
-    st.error("Impossible d'ouvrir la caméra")
-    st.stop()
+def initialize_camera():
+    # Essayer plusieurs sources de caméra
+    for i in range(3):  # Essayer 0, 1, 2
+        cap = cv2.VideoCapture(i)
+        if cap.isOpened():
+            st.success(f"✅ Caméra détectée (source {i})")
+            return cap
+    
+    # Si aucune caméra physique n'est trouvée
+    st.warning("⚠️ Aucune caméra physique détectée. Utilisation du mode test.")
+    
+    # Créer une caméra de test
+    class TestCamera:
+        def __init__(self):
+            self.width = 640
+            self.height = 480
+            self.frame_count = 0
+            
+        def read(self):
+            self.frame_count += 1
+            # Créer une image de test
+            frame = np.zeros((self.height, self.width, 3), dtype=np.uint8)
+            # Ajouter un visage simulé
+            center_x, center_y = self.width // 2, self.height // 2
+            cv2.ellipse(frame, (center_x, center_y), (100, 150), 0, 0, 360, (100, 100, 255), -1)
+            cv2.circle(frame, (center_x - 40, center_y - 30), 20, (255, 255, 255), -1)  # œil gauche
+            cv2.circle(frame, (center_x + 40, center_y - 30), 20, (255, 255, 255), -1)  # œil droit
+            cv2.circle(frame, (center_x - 40, center_y - 30), 10, (0, 0, 0), -1)  # pupille gauche
+            cv2.circle(frame, (center_x + 40, center_y - 30), 10, (0, 0, 0), -1)  # pupille droite
+            
+            # Ajouter du texte
+            cv2.putText(frame, "MODE TEST", (50, 50), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+            cv2.putText(frame, f"Frame: {self.frame_count}", (50, 100), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 200), 1)
+            cv2.putText(frame, "Aucune webcam detectee", (50, 450), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (150, 150, 255), 1)
+            
+            return True, frame
+        
+        def isOpened(self):
+            return True
+            
+        def get(self, prop):
+            if prop == cv2.CAP_PROP_FRAME_WIDTH:
+                return self.width
+            elif prop == cv2.CAP_PROP_FRAME_HEIGHT:
+                return self.height
+            elif prop == cv2.CAP_PROP_FPS:
+                return 30
+            return 0
+            
+        def release(self):
+            pass
+    
+    return TestCamera()
 
-width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+# CORRECTION : Initialiser la caméra avec la nouvelle fonction
+cap = initialize_camera()
 
+# Vérifier si c'est une caméra de test
+is_test_camera = isinstance(cap, type(initialize_camera()))
+
+# Obtenir les dimensions
+try:
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+except:
+    width, height = 640, 480  # Valeurs par défaut
+
+# Initialiser MediaPipe
 mp_face_mesh = mp.solutions.face_mesh
 face_mesh = mp_face_mesh.FaceMesh(static_image_mode=False, max_num_faces=1,
                                   refine_landmarks=True, min_detection_confidence=0.5,
@@ -110,6 +185,8 @@ def calibrate_tilt(frames=CALIBRATION_FRAMES):
     st.info("🔹 Calibration tilt...")
     tilt_values = []
     count = 0
+    progress_bar = st.progress(0)
+    
     while count < frames:
         ret, frame = cap.read()
         if not ret:
@@ -122,6 +199,8 @@ def calibrate_tilt(frames=CALIBRATION_FRAMES):
         tilt, _, _ = angle_between_eyes(lm, LEFT_EYE_IDX, RIGHT_EYE_IDX, width, height)
         tilt_values.append(tilt)
         count += 1
+        progress_bar.progress(count / frames)
+    
     center = float(np.mean(tilt_values)) if tilt_values else 0.0
     st.success(f"✅ Calibration terminée. Tilt_center={center:.2f}")
     return center
@@ -166,13 +245,10 @@ st_frame = st.empty()
 st_feedback = st.empty()
 
 # -----------------------------
-# MAIN LOOP STREAMLIT
+# MAIN LOOP STREAMLIT - VERSION CORRIGÉE
 # -----------------------------
-# -----------------------------
-# MAIN LOOP STREAMLIT
-# -----------------------------
-def main_loop(fig_dashboard=None, st_plot=None, st_frame=None, st_feedback=None):  # ⬅️ Suppression du paramètre duration_seconds
-    global model_enabled, DEBUG
+def main_loop(fig_dashboard=None, st_plot=None, st_frame=None, st_feedback=None):
+    global model_enabled, DEBUG, is_test_camera
     fps_interval = 1.0 / FPS_TARGET
     gaze_queue = deque(maxlen=int(WINDOW_SEC * FPS_TARGET))
     center_queue = deque(maxlen=int(WINDOW_SEC * FPS_TARGET))
@@ -182,7 +258,7 @@ def main_loop(fig_dashboard=None, st_plot=None, st_frame=None, st_feedback=None)
     ear_history = deque(maxlen=5)
     last_dashboard_update_local = 0.0
 
-    while st.session_state.running:  # ⬅️ Boucle continue tant que le bouton Start est actif
+    while st.session_state.running:
         loop_t0 = time.time()
         ret, frame = cap.read()
         if not ret:
@@ -203,11 +279,13 @@ def main_loop(fig_dashboard=None, st_plot=None, st_frame=None, st_feedback=None)
             focus = 0
             gaze_queue.append(0)
             feedback_msgs.append("No face detected")
+            if is_test_camera:
+                feedback_msgs.append("Mode Test Actif")
             update_dashboard(fig_dashboard, focus, eye_closed_val, face_detected_val, unstable_val)
             st_plot.plotly_chart(fig_dashboard)
             st_frame.image(frame_display, channels="BGR")
             st_feedback.text(" | ".join(feedback_msgs))
-            continue  # ⬅️ Pas de break ici, on continue tant que pas Stop
+            continue
 
         # ---------- Face detected
         lm = res.multi_face_landmarks[0].landmark
@@ -261,6 +339,11 @@ def main_loop(fig_dashboard=None, st_plot=None, st_frame=None, st_feedback=None)
             right_lower = (lm[374].x*width, lm[374].y*height)
             iris_left_y = lm[468].y*height if len(lm)>468 else None
             iris_right_y = lm[473].y*height if len(lm)>473 else None
+            
+            # CORRECTION : Variables eye_open_left et eye_open_right manquantes
+            eye_open_left = euclidean(left_upper, left_lower)
+            eye_open_right = euclidean(right_upper, right_lower)
+            
             if iris_left_y is not None and iris_right_y is not None and eye_open_left>2.5 and eye_open_right>2.5:
                 iris_visible=True
         except:
@@ -314,11 +397,16 @@ def main_loop(fig_dashboard=None, st_plot=None, st_frame=None, st_feedback=None)
         cv2.putText(frame_display,f"Gaze:{gaze} (Model {'ON' if model_enabled else 'OFF'})",(10,30),cv2.FONT_HERSHEY_SIMPLEX,0.7,(0,255,0),2)
         for idx,msg in enumerate(feedback_msgs):
             cv2.putText(frame_display,msg,(10,60+30*idx),cv2.FONT_HERSHEY_SIMPLEX,0.7,(0,0,255),2)
+        
+        # Ajouter indication mode test
+        if is_test_camera:
+            cv2.putText(frame_display, "MODE TEST", (width-150, 30), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
 
         st_frame.image(frame_display, channels="BGR")
         st_feedback.text(" | ".join(feedback_msgs))
 
-        # Suppression du break lié à la durée
+        # Gestion FPS
         t_elapsed = time.time()-loop_t0
         if t_elapsed<fps_interval: 
             time.sleep(max(0,fps_interval-t_elapsed))
@@ -332,25 +420,31 @@ if __name__=="__main__":
     if 'fig_dashboard' not in st.session_state:
         st.session_state.fig_dashboard = make_dashboard()
 
+    # Informations système
+    with st.expander("Informations système"):
+        st.write(f"Modèle chargé: {'✅' if model is not None else '❌'}")
+        st.write(f"Type caméra: {'🔄 Mode Test' if is_test_camera else '📷 Webcam Réelle'}")
+        st.write(f"Dimensions vidéo: {width}x{height}")
+
     # Boutons Start/Stop
     col1, col2 = st.columns(2)
     with col1:
-        if st.button("▶️ Start"):
+        if st.button("▶️ Start", type="primary", use_container_width=True):
             st.session_state.running = True
-            # Forcer un re-calcul du tilt si l'on veut, ou faire la calib initiale seulement
-            # tilt_center = calibrate_tilt() # Décommenter si vous voulez recalibrer à chaque Start
+            st.rerun()
     with col2:
-        if st.button("⏹ Stop"):
+        if st.button("⏹ Stop", type="secondary", use_container_width=True):
             st.session_state.running = False
+            st.rerun()
 
-    st.info("Status: " + ("Running" if st.session_state.running else "Stopped"))
+    st.info(f"Status: **{'🟢 Running' if st.session_state.running else '🔴 Stopped'}**")
 
     # Placeholders pour le dashboard et la vidéo
     st_plot = st.empty()
     st_frame = st.empty()
     st_feedback = st.empty()
 
-    # Affichage initial du dashboard (reste visible même après Stop)
+    # Affichage initial du dashboard
     st_plot.plotly_chart(st.session_state.fig_dashboard)
 
     if st.session_state.running:
@@ -359,22 +453,24 @@ if __name__=="__main__":
                   st_frame=st_frame,
                   st_feedback=st_feedback)
     else:
-        # 💡 BLOC DE NETTOYAGE/ARRÊT : S'exécute quand running est False
-        
-        # 1. Image d'arrêt (remplace la dernière frame vidéo)
-        # Assurez-vous que 'width' et 'height' sont globaux ou passés
-        # Étant donné qu'ils sont définis en dehors de la fonction main, ils devraient être accessibles.
+        # Image d'arrêt
         try:
-            # Crée une image noire de la taille de la vidéo
             dummy_frame = np.zeros((height, width, 3), dtype=np.uint8) 
             cv2.putText(dummy_frame, "SESSION ARRÊTÉE", (width//2 - 200, height//2), 
                         cv2.FONT_HERSHEY_SIMPLEX, 1.2, (200, 200, 200), 3)
-            
-            # Remplace la dernière frame affichée
+            cv2.putText(dummy_frame, "Cliquez sur Start pour commencer", (width//2 - 250, height//2 + 50), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (150, 150, 255), 2)
             st_frame.image(dummy_frame, channels="BGR")
-            
-        except NameError:
-             st_frame.text("Vidéo arrêtée (Taille non accessible pour l'image noire)")
+        except:
+            st_frame.text("Vidéo arrêtée")
+        
+        # Message de feedback
+        st_feedback.text("Session terminée. Cliquez sur Start pour lancer une nouvelle analyse.")
 
-        # 2. Message de feedback
-        st_feedback.text(" | Session terminée. Cliquez sur Start pour lancer une nouvelle analyse.")
+    # Nettoyage quand l'application se ferme
+    if not st.session_state.running and 'cap' in locals():
+        try:
+            if not is_test_camera:
+                cap.release()
+        except:
+            pass
