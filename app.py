@@ -5,17 +5,18 @@ import mediapipe as mp
 import math
 import time
 from collections import deque
-import av  # Nécessaire pour WebRTC
+import av 
 from streamlit_webrtc import webrtc_streamer, VideoTransformerBase, WebRtcMode
 from plotly.subplots import make_subplots
 import plotly.graph_objects as go
+import os # Pour vérifier l'existence du modèle
 
 # Import conditionnel pour TensorFlow pour éviter les erreurs si non installé
 try:
     from tensorflow.keras.models import load_model
     from tensorflow.keras.losses import MeanSquaredError
 except ImportError:
-    st.error("TensorFlow n'est pas installé.")
+    # st.error("TensorFlow n'est pas installé.") # En cloud, ceci s'affiche une fois
     load_model = None
     MeanSquaredError = None
 
@@ -28,15 +29,14 @@ WINDOW_SEC = 3
 EAR_THRESHOLD = 0.22
 EYE_CLOSED_CONSEC_FRAMES = 3
 STABILITY_MOVEMENT_THRESH = 25
-# PRIVACY_BLUR désactivé par défaut pour le web (coûteux en ressources)
 PRIVACY_BLUR = False 
-CALIBRATION_FRAMES = 50
+TILT_CENTER = 0.0 # Valeur par défaut pour le WebRTC
 
 LEFT_EYE_IDX = [33, 160, 158, 133, 153, 144]
 RIGHT_EYE_IDX = [362, 385, 387, 263, 373, 380]
 
 # -----------------------------
-# 2. UTILITAIRES (Votre logique originale)
+# 2. UTILITAIRES & DASHBOARD
 # -----------------------------
 def euclidean(a, b):
     return math.dist(a, b)
@@ -66,6 +66,17 @@ def angle_between_eyes(landmarks, left_idx, right_idx, w, h):
     except Exception:
         return 0.0, (0,0), (0,0)
 
+# Fonctions de couleur réintégrées
+def color_bar_stability(val):
+    if val < 30: return "red"
+    elif val < 70: return "orange"
+    else: return "green"
+
+def color_bar(val):
+    if val > 70: return "green"
+    elif val > 40: return "orange"
+    else: return "red"
+
 def make_dashboard():
     fig = make_subplots(
         rows=2, cols=2,
@@ -85,6 +96,7 @@ def make_dashboard():
 
 # Fonction pour mettre à jour l'état session sans erreur de clé
 def update_metrics_in_session(focus, eye_closed_val, face_detected_val, unstable_val, feedback_str):
+    # La stabilité est l'inverse de unstable_val dans le calcul focus
     eyes_open = 100 - eye_closed_val
     stable = 100 - unstable_val
     
@@ -92,32 +104,31 @@ def update_metrics_in_session(focus, eye_closed_val, face_detected_val, unstable
         "Focus": round(focus, 2),
         "EyesOpen": round(eyes_open, 2),
         "FaceDetected": round(face_detected_val, 2),
-        "Stability": round(stable, 2),
+        "Stability": round(stable, 2), 
         "Feedback": feedback_str
     }
 
 # -----------------------------
-# 3. CHARGEMENT MODÈLE
+# 3. CHARGEMENT MODÈLE (Cache)
 # -----------------------------
 @st.cache_resource
 def load_gaze_model(path):
-    if load_model is None: return None
+    if not os.path.exists(path):
+        st.warning(f"❌ Fichier modèle introuvable: {path}. Modèle désactivé.")
+        return None
+    if load_model is None: 
+        st.error("❌ TensorFlow n'est pas disponible. Modèle désactivé.")
+        return None
     try:
         model_local = load_model(path, custom_objects={'mse': MeanSquaredError()})
         print("✅ Modèle gaze chargé.")
         return model_local
     except Exception as e:
-        print(f"❌ Erreur chargement modèle : {e}")
+        st.error(f"❌ Erreur chargement modèle : {e}. Modèle désactivé.")
         return None
 
 GAZE_MODEL = load_gaze_model(MODEL_PATH)
 
-def get_tilt_center(model_gaze):
-    # Valeur par défaut pour éviter la complexité de calibration en WebRTC
-    return 0.0
-
-# Variable Globale pour éviter l'AttributeError de session_state
-TILT_CENTER = get_tilt_center(GAZE_MODEL)
 
 # ----------------------------------------------------
 # 4. CLASSE DE TRAITEMENT VIDÉO (Logique WebRTC)
@@ -141,7 +152,6 @@ class FocusTracker(VideoTransformerBase):
         self.ear_history = deque(maxlen=5)
 
     def transform(self, frame):
-        # Conversion format WebRTC -> OpenCV
         img = frame.to_ndarray(format="bgr")
         h, w = img.shape[:2]
 
@@ -160,6 +170,12 @@ class FocusTracker(VideoTransformerBase):
         if not res.multi_face_landmarks:
             self.counters["no_face"] += 1
             self.counters["eye_closed"] += 1
+            
+            if self.counters["total"] > 0:
+                 eye_closed_val = min(100,(self.counters["eye_closed"]/self.counters["total"])*100)
+                 face_detected_val = min(100,((self.counters["total"]-self.counters["no_face"])/self.counters["total"])*100)
+            
+            self.gaze_queue.append(0)
             feedback_msgs.append("No face detected")
             
         else:
@@ -199,10 +215,9 @@ class FocusTracker(VideoTransformerBase):
             tilt_delta = abs(current_tilt - self.tilt_center)
             dynamic_ear_threshold = EAR_THRESHOLD + min(0.07, tilt_delta * 0.003)
             
-            # Iris logic (simplifiée depuis votre code original)
+            # Iris logic (simplifiée)
             iris_visible = False
             try:
-                # Vérification basique si points iris existent
                 if len(lm) > 473:
                     iris_visible = True
             except:
@@ -211,7 +226,8 @@ class FocusTracker(VideoTransformerBase):
             self.ear_history.append(ear)
             ear_smoothed = float(np.mean(self.ear_history)) if self.ear_history else ear
 
-            eyes_closed_detected = (ear_smoothed < dynamic_ear_threshold) and (not iris_visible)
+            eyes_closed_detected = (ear_smoothed < dynamic_ear_threshold)
+            
             if eyes_closed_detected:
                 self.consecutive_eye_closed += 1
             else:
@@ -250,7 +266,8 @@ class FocusTracker(VideoTransformerBase):
 
             # Dessin feedback
             cv2.rectangle(img, (x_min, y_min), (x_max, y_max), (0, 255, 0), 2)
-            cv2.putText(img,f"Gaze:{gaze}",(10,30),cv2.FONT_HERSHEY_SIMPLEX,0.7,(0,255,0),2)
+            gaze_status_text = f"Gaze:{gaze} (Model {'ON' if self.model is not None else 'OFF'})"
+            cv2.putText(img, gaze_status_text, (10,30),cv2.FONT_HERSHEY_SIMPLEX,0.7,(0,255,0),2)
             for idx, msg in enumerate(feedback_msgs):
                 cv2.putText(img, msg, (10, 60 + 30 * idx), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
         
@@ -262,16 +279,13 @@ class FocusTracker(VideoTransformerBase):
 # -----------------------------
 # 5. STREAMLIT APP
 # -----------------------------
+st.set_page_config(layout="wide", page_title="AI Focus Tracker")
 st.title("AI Focus Tracker - Streamlit Cloud")
 
-# Initialisation de Session State avec les bonnes clés
+# Initialisation de Session State 
 if 'dashboard_metrics' not in st.session_state:
     st.session_state.dashboard_metrics = {
-        "Focus": 0, 
-        "EyesOpen": 0,       
-        "FaceDetected": 0, 
-        "Stability": 0,      
-        "Feedback": "En attente du démarrage..."
+        "Focus": 0, "EyesOpen": 0, "FaceDetected": 0, "Stability": 0, "Feedback": "En attente du démarrage..."
     }
 if 'fig_dashboard' not in st.session_state:
     st.session_state.fig_dashboard = make_dashboard()
@@ -283,31 +297,54 @@ st_feedback = st.empty()
 # --------------------
 # WEBRTC STREAMER
 # --------------------
-webrtc_ctx = webrtc_streamer(
-    key="focus-tracker-key",
-    mode=WebRtcMode.SENDRECV,
-    rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
-    # Utilisation de TILT_CENTER global
-    video_processor_factory=lambda: FocusTracker(GAZE_MODEL, TILT_CENTER), 
-    media_stream_constraints={"video": True, "audio": False},
-    async_processing=True,
-)
+col_webrtc, col_metrics = st.columns([1, 1])
 
-# Mise à jour du dashboard
-if webrtc_ctx.state.playing:
+with col_webrtc:
+    st.markdown("### 🎥 Flux Vidéo")
+    webrtc_ctx = webrtc_streamer(
+        key="focus-tracker-key",
+        mode=WebRtcMode.SENDRECV,
+        rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
+        video_processor_factory=lambda: FocusTracker(GAZE_MODEL, TILT_CENTER), 
+        media_stream_constraints={"video": True, "audio": False},
+        async_processing=True,
+    )
+
+# --------------------
+# MISE À JOUR DASHBOARD (Dans la colonne Metrics)
+# --------------------
+with col_metrics:
+    st.markdown("### 📊 Tableau de Bord Concentration")
     
+    # Affichage du dashboard
     metrics = st.session_state.dashboard_metrics
+    fig_updated = st.session_state.fig_dashboard
     
-    # Utilisation des clés correctes
+    # Mise à jour des valeurs et couleurs
     values = [metrics["Focus"], metrics["EyesOpen"], metrics["FaceDetected"], metrics["Stability"]]
     
-    fig_updated = st.session_state.fig_dashboard
     for i in range(4):
+        # Mise à jour des valeurs
         fig_updated.data[i].value = values[i]
         
-    st_plot.plotly_chart(fig_updated)
-    st_feedback.text(f"Status: En cours | Feedback: {metrics['Feedback']}")
+        # Mise à jour des couleurs (Basé sur la métrique affichée)
+        if i == 0: # Focus
+            fig_updated.data[i].gauge.bar.color = color_bar(values[i])
+        elif i == 1: # Yeux ouverts
+            fig_updated.data[i].gauge.bar.color = color_bar(values[i])
+        elif i == 2: # Visage détecté
+            fig_updated.data[i].gauge.bar.color = color_bar(values[i])
+        elif i == 3: # Stabilité (Notez que la métrique en session state est déjà 100-unstable)
+            fig_updated.data[i].gauge.bar.color = color_bar_stability(values[i])
 
+    # Affichage du graphique mis à jour
+    # L'utilisation de st.empty() n'est pas nécessaire ici, car nous sommes dans une colonne
+    st_plot.plotly_chart(fig_updated, use_container_width=True)
+
+# --------------------
+# AFFICHAGE FEEDBACK
+# --------------------
+if webrtc_ctx.state.playing:
+    st_feedback.info(f"Status: **En cours** | Feedback: {metrics['Feedback']}")
 else:
-    st_plot.plotly_chart(st.session_state.fig_dashboard)
-    st_feedback.text("Status: Stopped | Cliquez sur START pour analyser.")
+    st_feedback.warning("Status: **Stopped** | Cliquez sur **Start** ci-dessus pour lancer l'analyse.")
