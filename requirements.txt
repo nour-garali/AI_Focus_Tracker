@@ -1,9 +1,5 @@
 streamlit==1.28.1
-mediapipe==0.10.14
-opencv-python==4.8.1.78  # REMPLACER opencv-python-headless
 numpy==1.24.3
-tensorflow-cpu==2.13.0  # Version plus légère pour Streamlit Cloud
-protobuf==4.25.3
-pandas==2.0.3
 plotly==5.18.0
 Pillow==10.1.0
+pandas==2.0.3
