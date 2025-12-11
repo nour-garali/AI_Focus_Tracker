@@ -1,3 +1,2 @@
-# packages.txt
 python3.11-dev
 libglib2.0-0
