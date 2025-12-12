@@ -20,7 +20,7 @@ from plotly.subplots import make_subplots
 # -----------------------------
 # CONFIGURATION (modifiable)
 # -----------------------------
-MODEL_PATH = "best_gaze_model.keras"
+MODEL_PATH = "best_gaze_model.h5"
 DURATION_SECONDS = 30
 FPS_TARGET = 15
 WINDOW_SEC = 3
