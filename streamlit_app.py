@@ -118,14 +118,46 @@ def update_dashboard(fig, focus, eye_closed_val, face_detected_val, unstable_val
 # -----------------------------
 # Load model (non bloquant)
 # -----------------------------
+# -----------------------------
+# Load model (non bloquant) corrigé pour Keras 3.x
+# -----------------------------
 @st.cache_resource(show_spinner=False)
 def load_gaze_model_cached(path):
+    """
+    Charge le modèle H5 en gérant les incompatibilités Keras 3.x
+    """
     try:
-        model_local = load_model(path, custom_objects={'mse': MeanSquaredError()})
+        from tensorflow.keras.models import load_model
+        from tensorflow.keras.losses import MeanSquaredError
+
+        # Chargement direct avec custom_objects
+        model_local = load_model(path, compile=False, custom_objects={'MeanSquaredError': MeanSquaredError})
         return model_local
     except Exception as e:
-        st.warning(f"Erreur chargement modèle : {e}. Mode modèle désactivé.")
-        return None
+        # Si erreur InputLayer batch_shape (Keras 3.x), tenter workaround
+        import h5py
+        import json
+        from tensorflow.keras.models import model_from_json
+
+        try:
+            with h5py.File(path, 'r') as f:
+                if 'model_config' in f.attrs:
+                    model_config = f.attrs['model_config']
+                    model_config_dict = json.loads(model_config)
+                    # Supprime batch_shape des InputLayer
+                    for layer in model_config_dict.get('config', {}).get('layers', []):
+                        if layer['class_name'] == 'InputLayer' and 'batch_shape' in layer['config']:
+                            layer['config'].pop('batch_shape')
+                    model_local = model_from_json(json.dumps(model_config_dict))
+                    # Charger les poids
+                    model_local.load_weights(path)
+                    return model_local
+                else:
+                    st.warning("Impossible de lire la config du modèle depuis H5")
+                    return None
+        except Exception as e2:
+            st.warning(f"Erreur chargement modèle workaround : {e2}. Mode modèle désactivé.")
+            return None
 
 # charger modèle (sera accessible pour l'instance transformer aussi)
 model = load_gaze_model_cached(MODEL_PATH)
