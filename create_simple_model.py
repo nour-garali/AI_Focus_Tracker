@@ -1,36 +1,44 @@
-# create_simple_model.py
+# create_simple_model_final.py
 import tensorflow as tf
 import numpy as np
 import os
 
-print("🔄 Création modèle SANS Conv2D...")
+print("🔄 Création modèle FINAL sans Conv2D...")
 
 # Supprime l'ancien
 if os.path.exists("best_gaze_model.keras"):
     os.remove("best_gaze_model.keras")
 
-# Modèle SANS Conv2D (pour éviter les erreurs de poids)
+# Modèle SANS Conv2D (100% compatible)
 model = tf.keras.Sequential([
-    tf.keras.layers.Input(shape=(64, 64, 3)),
-    tf.keras.layers.Flatten(),
-    tf.keras.layers.Dense(32, activation='relu'),
-    tf.keras.layers.Dense(1, activation='tanh')
+    tf.keras.layers.Input(shape=(64, 64, 3), name='input_layer'),
+    tf.keras.layers.Flatten(name='flatten'),
+    tf.keras.layers.Dense(64, activation='relu', name='dense1'),
+    tf.keras.layers.Dense(32, activation='relu', name='dense2'),
+    tf.keras.layers.Dense(1, activation='tanh', name='output')
 ])
 
-# Compile SIMPLEMENT
-model.compile(optimizer='adam', loss='mse')
+# Compile avec des paramètres simples
+model.compile(
+    optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
+    loss='mse',
+    metrics=['mae']
+)
 
-# Entraînement minimal
-x = np.random.randn(10, 64, 64, 3).astype(np.float32)
-y = np.random.randn(10, 1).astype(np.float32)
-model.fit(x, y, epochs=2, verbose=0)
+# Entraînement minimal avec données variées
+x = np.random.randn(100, 64, 64, 3).astype(np.float32)
+y = np.random.randn(100, 1).astype(np.float32) * 0.5  # Valeurs entre -0.5 et 0.5
+
+model.fit(x, y, epochs=3, verbose=0, batch_size=16)
 
 # Sauvegarde
 model.save('best_gaze_model.keras')
 
-print("✅ Modèle SIMPLE créé")
+print("✅ Modèle FINAL créé: best_gaze_model.keras")
 print(f"📏 Taille: {os.path.getsize('best_gaze_model.keras') / 1024:.1f} KB")
 
-# Test
-test = tf.keras.models.load_model('best_gaze_model.keras')
-print(f"✅ Test chargement: {test.predict(x[:1])[0][0]:.4f}")
+# Test complet
+test_model = tf.keras.models.load_model('best_gaze_model.keras')
+prediction = test_model.predict(x[:1], verbose=0)
+print(f"🎯 Test prédiction: {prediction[0][0]:.4f}")
+print(f"✅ Architecture: {[layer.name for layer in test_model.layers]}")
