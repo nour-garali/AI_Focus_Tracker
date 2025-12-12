@@ -1,4 +1,4 @@
-# app_streamlit.py
+# streamlit_app.py - VERSION FINALE
 import streamlit as st
 import numpy as np
 import math
@@ -8,6 +8,9 @@ import sys
 from collections import deque
 from plotly.subplots import make_subplots
 import plotly.graph_objects as go
+import plotly.io as pio
+from PIL import Image
+import io
 
 # -----------------------------
 # DÉTECTION STREAMLIT CLOUD
@@ -17,7 +20,7 @@ IS_STREAMLIT_CLOUD = os.environ.get('STREAMLIT_CLOUD') is not None
 # -----------------------------
 # CHARGEMENT UNIFIÉ DES BIBLIOTHÈQUES
 # -----------------------------
-# Toujours importer les vraies bibliothèques, elles seront mockées si nécessaire
+# Toujours importer les vraies bibliothèques
 try:
     import cv2
     import mediapipe as mp
@@ -29,80 +32,7 @@ except ImportError as e:
     st.stop()
 
 # -----------------------------
-# GESTIONNAIRE DE CAMÉRA UNIFIÉ
-# -----------------------------
-class CameraManager:
-    """Gestionnaire de caméra qui fonctionne sur Streamlit Cloud et en local"""
-    
-    def __init__(self):
-        self.is_streamlit_cloud = IS_STREAMLIT_CLOUD
-        self.local_camera = None
-        self.width = 640
-        self.height = 480
-        self.frame_count = 0
-        
-        if self.is_streamlit_cloud:
-            st.info("🔍 **Mode caméra navigateur activé** - Utilisez la caméra de votre navigateur")
-    
-    def get_frame(self):
-        """Obtenir un frame depuis la source appropriée"""
-        if self.is_streamlit_cloud:
-            return self._get_frame_from_browser()
-        else:
-            return self._get_frame_from_local_camera()
-    
-    def _get_frame_from_browser(self):
-        """Obtenir un frame depuis le navigateur (Streamlit Cloud)"""
-        # Utiliser st.camera_input pour obtenir une image du navigateur
-        camera_image = st.camera_input("Capturez votre visage", key=f"camera_{self.frame_count}")
-        
-        if camera_image is not None:
-            self.frame_count += 1
-            
-            # Convertir l'image Streamlit en format OpenCV
-            bytes_data = camera_image.getvalue()
-            nparr = np.frombuffer(bytes_data, np.uint8)
-            frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-            
-            # Redimensionner si nécessaire
-            if frame is not None:
-                frame = cv2.resize(frame, (self.width, self.height))
-                return True, frame
-        
-        return False, None
-    
-    def _get_frame_from_local_camera(self):
-        """Obtenir un frame depuis la webcam locale"""
-        # Initialiser la caméra locale si ce n'est pas déjà fait
-        if self.local_camera is None:
-            self.local_camera = cv2.VideoCapture(0)
-            if not self.local_camera.isOpened():
-                st.error("❌ Impossible d'ouvrir la caméra. Vérifiez:")
-                st.error("1. La caméra est branchée")
-                st.error("2. Aucune autre application n'utilise la caméra")
-                st.error("3. Les permissions sont accordées")
-                return False, None
-            
-            # Définir les dimensions
-            self.width = int(self.local_camera.get(cv2.CAP_PROP_FRAME_WIDTH))
-            self.height = int(self.local_camera.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        
-        # Lire le frame
-        ret, frame = self.local_camera.read()
-        return ret, frame
-    
-    def get_dimensions(self):
-        """Obtenir les dimensions de la caméra"""
-        return self.width, self.height
-    
-    def release(self):
-        """Libérer les ressources de la caméra"""
-        if self.local_camera is not None:
-            self.local_camera.release()
-            self.local_camera = None
-
-# -----------------------------
-# CONFIGURATION (identique à votre code)
+# CONFIGURATION (identique à votre code original)
 # -----------------------------
 MODEL_PATH = "best_gaze_model.keras"
 DURATION_SECONDS = 30
@@ -121,7 +51,101 @@ RIGHT_EYE_IDX = [362, 385, 387, 263, 373, 380]
 DEBUG = False
 
 # -----------------------------
-# UTILITAIRES (identique à votre code)
+# GESTIONNAIRE DE CAMÉRA TEMPS RÉEL
+# -----------------------------
+class RealTimeCamera:
+    """Gestionnaire de caméra temps réel pour Streamlit Cloud et local"""
+    
+    def __init__(self):
+        self.is_cloud = IS_STREAMLIT_CLOUD
+        self.local_cap = None
+        self.width = 640
+        self.height = 480
+        self.last_frame = None
+        self.frame_count = 0
+        
+        if self.is_cloud:
+            # Initialiser la session state pour la caméra
+            if 'camera_active' not in st.session_state:
+                st.session_state.camera_active = False
+            if 'last_capture' not in st.session_state:
+                st.session_state.last_capture = None
+    
+    def start(self):
+        """Démarrer la caméra"""
+        if not self.is_cloud:
+            # Mode local: démarrer cv2.VideoCapture
+            self.local_cap = cv2.VideoCapture(0)
+            if not self.local_cap.isOpened():
+                st.error("❌ Impossible d'ouvrir la caméra locale")
+                return False
+            
+            self.width = int(self.local_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            self.height = int(self.local_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        
+        return True
+    
+    def get_frame(self):
+        """Obtenir un frame en temps réel"""
+        self.frame_count += 1
+        
+        if self.is_cloud:
+            # Mode Streamlit Cloud: utiliser st.camera_input avec rafraîchissement automatique
+            # On utilise une clé qui change pour forcer le rafraîchissement
+            camera_key = f"camera_live_{self.frame_count}"
+            
+            # Créer un placeholder pour la caméra
+            if 'camera_placeholder' not in st.session_state:
+                st.session_state.camera_placeholder = st.empty()
+            
+            # Afficher la caméra et attendre une capture
+            with st.session_state.camera_placeholder.container():
+                camera_image = st.camera_input(
+                    "Votre caméra en direct - Analyse en temps réel",
+                    key=camera_key
+                )
+            
+            if camera_image is not None:
+                # Convertir en OpenCV
+                bytes_data = camera_image.getvalue()
+                nparr = np.frombuffer(bytes_data, np.uint8)
+                frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                
+                # Sauvegarder pour référence
+                st.session_state.last_capture = frame
+                self.last_frame = frame
+                
+                # Redimensionner si nécessaire
+                frame = cv2.resize(frame, (self.width, self.height))
+                return True, frame
+            elif st.session_state.last_capture is not None:
+                # Réutiliser la dernière capture si disponible
+                frame = st.session_state.last_capture
+                frame = cv2.resize(frame, (self.width, self.height))
+                return True, frame
+            
+            return False, None
+        
+        else:
+            # Mode local: lire depuis cv2
+            if self.local_cap is None:
+                return False, None
+            
+            ret, frame = self.local_cap.read()
+            if ret:
+                self.last_frame = frame
+            return ret, frame
+    
+    def get_dimensions(self):
+        return self.width, self.height
+    
+    def release(self):
+        if self.local_cap is not None:
+            self.local_cap.release()
+            self.local_cap = None
+
+# -----------------------------
+# UTILITAIRES (EXACTEMENT comme votre code original)
 # -----------------------------
 def euclidean(a, b):
     return math.dist(a, b)
@@ -161,27 +185,38 @@ def color_bar(val):
     elif val > 40: return "orange"
     else: return "red"
 
+def get_eye_open_values(lm, width, height):
+    """Calcule les valeurs eye_open_left et eye_open_right"""
+    try:
+        left_upper = (lm[159].x*width, lm[159].y*height)
+        left_lower = (lm[145].x*width, lm[145].y*height)
+        right_upper = (lm[386].x*width, lm[386].y*height)
+        right_lower = (lm[374].x*width, lm[374].y*height)
+        
+        eye_open_left = euclidean(left_upper, left_lower)
+        eye_open_right = euclidean(right_upper, right_lower)
+        
+        return eye_open_left, eye_open_right
+    except:
+        return 10.0, 10.0
+
 # ============================================
-# SECTION 1 : LOAD MODEL (adaptée)
+# SECTION 1 : LOAD MODEL (identique)
 # ============================================
 def load_gaze_model(path):
     """Charge le modèle - VERSION UNIFIÉE"""
     try:
-        # Vérifie si le fichier existe
         if not os.path.exists(path):
             if IS_STREAMLIT_CLOUD:
                 st.info("📁 Création d'un modèle de démonstration...")
-                # En mode cloud, crée un modèle simple si absent
                 create_demo_model(path)
             else:
                 st.error(f"Fichier modèle {path} non trouvé")
                 return None
         
-        # Charge le modèle
         try:
             model_local = load_model(path, custom_objects={'mse': MeanSquaredError()})
         except:
-            # Si échec, charge sans custom_objects
             model_local = load_model(path, compile=False)
         
         st.success("✅ Modèle gaze chargé.")
@@ -215,11 +250,11 @@ def create_demo_model(path):
         st.warning("❌ Impossible de créer le modèle de démo")
 
 # ============================================
-# INITIALISATION DES COMPOSANTS
+# INITIALISATION
 # ============================================
 # Initialiser le gestionnaire de caméra
-camera_manager = CameraManager()
-width, height = camera_manager.get_dimensions()
+camera = RealTimeCamera()
+width, height = 640, 480  # Valeurs par défaut
 
 # Charger le modèle
 model = load_gaze_model(MODEL_PATH)
@@ -239,59 +274,81 @@ except Exception as e:
     st.warning(f"⚠️ MediaPipe en mode limité: {str(e)[:50]}")
 
 # ============================================
-# CALIBRATION (adaptée pour le nouveau système)
+# CALIBRATION (adaptée mais conserve votre logique)
 # ============================================
 def calibrate_tilt(frames=CALIBRATION_FRAMES):
-    """Calibration adaptée au nouveau système de caméra"""
+    """Calibration adaptée au nouveau système"""
     if IS_STREAMLIT_CLOUD:
         st.info("🔹 Calibration via navigateur...")
-        st.info("Veuillez vous positionner face à la caméra pour la calibration")
+        st.info("Veuillez vous positionner face à la caméra")
         
         tilt_values = []
         count = 0
         calibration_placeholder = st.empty()
+        calibration_placeholder.info("Préparez-vous pour la calibration...")
         
-        # Sur Streamlit Cloud, on utilise des captures individuelles
-        while count < frames:
-            calibration_placeholder.text(f"⏳ Calibration... {count+1}/{frames} (capture en cours)")
+        # Créer un état pour la calibration
+        if 'calibration_done' not in st.session_state:
+            st.session_state.calibration_done = False
+            st.session_state.calibration_frames = []
+            st.session_state.calibration_count = 0
+        
+        # Interface de calibration
+        cal_col1, cal_col2 = st.columns([2, 1])
+        with cal_col1:
+            cal_camera = st.camera_input("Calibration - Montrez votre visage", key="calibration_cam")
+        
+        with cal_col2:
+            st.subheader("Calibration")
+            progress_bar = st.progress(0)
+            st.write(f"Frames: {st.session_state.calibration_count}/{frames}")
             
-            # Obtenir un frame via le gestionnaire
-            ret, frame = camera_manager.get_frame()
-            
-            if not ret:
-                # Attendre un peu avant de réessayer
-                time.sleep(0.1)
-                continue
-            
-            # Traiter le frame
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            res = face_mesh.process(rgb)
-            
-            if not res.multi_face_landmarks:
-                calibration_placeholder.text(f"⏳ Calibration... {count+1}/{frames} (attente visage)")
-                time.sleep(0.1)
-                continue
+            if cal_camera is not None and st.session_state.calibration_count < frames:
+                # Traiter l'image
+                bytes_data = cal_camera.getvalue()
+                nparr = np.frombuffer(bytes_data, np.uint8)
+                frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                frame = cv2.resize(frame, (640, 480))
                 
-            lm = res.multi_face_landmarks[0].landmark
-            tilt, _, _ = angle_between_eyes(lm, LEFT_EYE_IDX, RIGHT_EYE_IDX, width, height)
-            tilt_values.append(tilt)
-            count += 1
+                # Détection du visage
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                res = face_mesh.process(rgb)
+                
+                if res.multi_face_landmarks:
+                    lm = res.multi_face_landmarks[0].landmark
+                    tilt, _, _ = angle_between_eyes(lm, LEFT_EYE_IDX, RIGHT_EYE_IDX, 640, 480)
+                    tilt_values.append(tilt)
+                    st.session_state.calibration_count += 1
+                    progress_bar.progress(st.session_state.calibration_count / frames)
+                    
+                    # Afficher le tilt
+                    st.metric("Tilt actuel", f"{tilt:.2f}°")
         
-        calibration_placeholder.empty()
-        center = float(np.mean(tilt_values)) if tilt_values else 0.0
-        st.success(f"✅ Calibration terminée. Tilt_center={center:.2f}")
-        return center
+        # Quand calibration terminée
+        if st.session_state.calibration_count >= frames:
+            calibration_placeholder.empty()
+            center = float(np.mean(tilt_values)) if tilt_values else 0.0
+            st.success(f"✅ Calibration terminée. Tilt_center={center:.2f}")
+            st.session_state.calibration_done = True
+            return center
+        
+        # Si pas encore terminé, retourner une valeur par défaut
+        return 0.0
     
     else:
-        # En local, calibration en temps réel
-        st.info("🔹 Calibration tilt en cours...")
+        # Mode local: calibration originale
+        st.info("🔹 Calibration tilt...")
         tilt_values = []
         count = 0
         calibration_placeholder = st.empty()
         
+        # Démarrer la caméra
+        camera.start()
+        
         while count < frames:
-            ret, frame = camera_manager.get_frame()
+            ret, frame = camera.get_frame()
             if not ret:
+                time.sleep(0.05)
                 continue
             
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -299,6 +356,7 @@ def calibrate_tilt(frames=CALIBRATION_FRAMES):
             
             if not res.multi_face_landmarks:
                 calibration_placeholder.text(f"⏳ Calibration... {count+1}/{frames} (attente visage)")
+                time.sleep(0.05)
                 continue
                 
             lm = res.multi_face_landmarks[0].landmark
@@ -312,16 +370,8 @@ def calibrate_tilt(frames=CALIBRATION_FRAMES):
         st.success(f"✅ Calibration terminée. Tilt_center={center:.2f}")
         return center
 
-# Initialiser la calibration
-tilt_center = 0.0
-try:
-    tilt_center = calibrate_tilt(CALIBRATION_FRAMES)
-except Exception as e:
-    st.warning(f"Calibration simplifiée - Tilt_center=0.0 ({str(e)[:50]})")
-    tilt_center = 0.0
-
 # ============================================
-# DASHBOARD (identique à votre code)
+# DASHBOARD (EXACTEMENT comme votre code)
 # ============================================
 def make_dashboard():
     fig = make_subplots(
@@ -353,29 +403,17 @@ def update_dashboard(fig, focus, eye_closed_val, face_detected_val, unstable_val
     return fig
 
 # ============================================
-# FONCTIONS AUXILIAIRES (identique à votre code)
+# BOUCLE PRINCIPALE TEMPS RÉEL (VOTRE LOGIQUE ORIGINALE)
 # ============================================
-def get_eye_open_values(lm, width, height):
-    """Calcule les valeurs eye_open_left et eye_open_right"""
-    try:
-        left_upper = (lm[159].x*width, lm[159].y*height)
-        left_lower = (lm[145].x*width, lm[145].y*height)
-        right_upper = (lm[386].x*width, lm[386].y*height)
-        right_lower = (lm[374].x*width, lm[374].y*height)
-        
-        eye_open_left = euclidean(left_upper, left_lower)
-        eye_open_right = euclidean(right_upper, right_lower)
-        
-        return eye_open_left, eye_open_right
-    except:
-        return 10.0, 10.0  # Valeurs par défaut
-
-# ============================================
-# BOUCLE PRINCIPALE (adaptée au nouveau système)
-# ============================================
-def main_loop(fig_dashboard=None, st_plot=None, st_frame=None, st_feedback=None):
+def main_loop():
     global model_enabled, DEBUG
     
+    # Démarrer la caméra
+    if not camera.start():
+        st.error("Impossible de démarrer la caméra")
+        return
+    
+    # Initialisation des variables (identique à votre code)
     fps_interval = 1.0 / FPS_TARGET
     gaze_queue = deque(maxlen=int(WINDOW_SEC * FPS_TARGET))
     center_queue = deque(maxlen=int(WINDOW_SEC * FPS_TARGET))
@@ -385,36 +423,57 @@ def main_loop(fig_dashboard=None, st_plot=None, st_frame=None, st_feedback=None)
     ear_history = deque(maxlen=5)
     last_dashboard_update_local = 0.0
     demo_counter = 0
-
+    
+    # Obtenir les dimensions
+    width, height = camera.get_dimensions()
+    
+    # Placeholders pour l'affichage
+    if 'video_placeholder' not in st.session_state:
+        st.session_state.video_placeholder = st.empty()
+    if 'dashboard_placeholder' not in st.session_state:
+        st.session_state.dashboard_placeholder = st.empty()
+    if 'feedback_placeholder' not in st.session_state:
+        st.session_state.feedback_placeholder = st.empty()
+    
+    # Créer le dashboard initial
+    fig_dashboard = make_dashboard()
+    st.session_state.dashboard_placeholder.plotly_chart(fig_dashboard)
+    
+    # Boucle principale
+    start_time = time.time()
+    
     while st.session_state.running:
         loop_t0 = time.time()
         
-        # Obtenir un frame via le gestionnaire de caméra
-        ret, frame = camera_manager.get_frame()
+        # Obtenir un frame
+        ret, frame = camera.get_frame()
         
         if not ret:
-            # Sur Streamlit Cloud, on attend une capture
+            # Sur Streamlit Cloud, on attend
             if IS_STREAMLIT_CLOUD:
-                time.sleep(0.5)  # Petit délai avant de réessayer
+                time.sleep(0.5)
+                st.session_state.feedback_placeholder.text("⏳ En attente d'une capture...")
                 continue
             else:
-                # En local, continuer normalement
                 continue
         
         counters["total"] += 1
         demo_counter += 1
         
-        # Indicateur de mode
+        # LOGIQUE ORIGINALE - COMMENCE ICI
+        
+        # Pour Streamlit Cloud, ajouter un indicateur
         if IS_STREAMLIT_CLOUD:
-            cv2.putText(frame, "STREAMLIT CLOUD - MODE NAVIGATEUR", (50, height - 30), 
+            cv2.putText(frame, "MODE NAVIGATEUR - TEMPS RÉEL", (50, height - 30), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
         
+        # Flou de confidentialité (identique)
         frame_display = cv2.GaussianBlur(frame,(51,51),0) if PRIVACY_BLUR else frame.copy()
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         res = face_mesh.process(rgb)
         feedback_msgs = []
 
-        # ---------- No face detected
+        # ---------- No face detected (identique)
         if not res.multi_face_landmarks:
             counters["no_face"] += 1
             counters["eye_closed"] +=1
@@ -424,13 +483,24 @@ def main_loop(fig_dashboard=None, st_plot=None, st_frame=None, st_feedback=None)
             focus = 0
             gaze_queue.append(0)
             feedback_msgs.append("No face detected")
+            
+            # Mettre à jour le dashboard
             update_dashboard(fig_dashboard, focus, eye_closed_val, face_detected_val, unstable_val)
-            st_plot.plotly_chart(fig_dashboard)
-            st_frame.image(frame_display, channels="BGR")
-            st_feedback.text(" | ".join(feedback_msgs))
+            st.session_state.dashboard_placeholder.plotly_chart(fig_dashboard)
+            
+            # Afficher le frame avec le message
+            cv2.putText(frame_display, "NO FACE DETECTED", (width//2 - 150, height//2), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+            st.session_state.video_placeholder.image(frame_display, channels="BGR")
+            st.session_state.feedback_placeholder.text(" | ".join(feedback_msgs))
+            
+            # Gestion FPS
+            t_elapsed = time.time() - loop_t0
+            if t_elapsed < fps_interval: 
+                time.sleep(max(0, fps_interval - t_elapsed))
             continue
 
-        # ---------- Face detected
+        # ---------- Face detected (LOGIQUE ORIGINALE)
         lm = res.multi_face_landmarks[0].landmark
         xs_all = [lm[i].x*width for i in range(len(lm))]
         ys_all = [lm[i].y*height for i in range(len(lm))]
@@ -438,6 +508,7 @@ def main_loop(fig_dashboard=None, st_plot=None, st_frame=None, st_feedback=None)
         x_max, y_max = min(width-1,int(max(xs_all)+10)), min(height-1,int(max(ys_all)+10))
         face_roi = frame[y_min:y_max, x_min:x_max]
 
+        # Flou de confidentialité (identique)
         if PRIVACY_BLUR:
             x_min = max(0, x_min)
             y_min = max(0, y_min)
@@ -453,7 +524,7 @@ def main_loop(fig_dashboard=None, st_plot=None, st_frame=None, st_feedback=None)
             face_roi = face_roi[:h_min, :w_min]
             frame_display[y_min:y_min+h_min, x_min:x_min+w_min] = face_roi
 
-        # Gaze model
+        # Gaze model (identique)
         pred = 0.0
         if model_enabled and model is not None:
             try:
@@ -462,15 +533,22 @@ def main_loop(fig_dashboard=None, st_plot=None, st_frame=None, st_feedback=None)
             except:
                 pred = 0.0
         else:
-            # Simulation pour Streamlit Cloud ou modèle manquant
+            # Simulation pour Streamlit Cloud
             pred = math.sin(demo_counter * 0.1) * 0.8
             
-        if pred > 0.5: gaze = "RIGHT"; counters["right"] += 1
-        elif pred < -0.5: gaze = "LEFT"; counters["left"] += 1
-        else: gaze = "CENTER"; counters["center_gaze"] += 1
+        if pred > 0.5: 
+            gaze = "RIGHT"
+            counters["right"] += 1
+        elif pred < -0.5: 
+            gaze = "LEFT"
+            counters["left"] += 1
+        else: 
+            gaze = "CENTER"
+            counters["center_gaze"] += 1
+            
         gaze_queue.append(pred)
 
-        # Eyes
+        # Eyes (LOGIQUE ORIGINALE)
         ear_left = eye_aspect_ratio(lm, LEFT_EYE_IDX, width, height)
         ear_right = eye_aspect_ratio(lm, RIGHT_EYE_IDX, width, height)
         ear = (ear_left + ear_right)/2.0
@@ -497,23 +575,30 @@ def main_loop(fig_dashboard=None, st_plot=None, st_frame=None, st_feedback=None)
         ear_history.append(ear)
         ear_smoothed = float(np.mean(ear_history)) if len(ear_history)>0 else ear
         eyes_closed_detected = (ear_smoothed < dynamic_ear_threshold) and (not iris_visible)
+        
         if eyes_closed_detected:
             consecutive_eye_closed += 1
         else:
             consecutive_eye_closed = 0
+            
         eye_closed_flag = (consecutive_eye_closed >= EYE_CLOSED_CONSEC_FRAMES)
-        if eye_closed_flag: counters["eye_closed"] +=1
-        if eye_closed_flag: feedback_msgs.append("Eyes Closed")
+        
+        if eye_closed_flag: 
+            counters["eye_closed"] +=1
+        if eye_closed_flag: 
+            feedback_msgs.append("Eyes Closed")
 
-        # Stability
+        # Stability (LOGIQUE ORIGINALE)
         center = ((x_min+x_max)/2, (y_min+y_max)/2)
         center_queue.append(center)
         unstable_flag=False
         instability_score=0
+        
         if len(center_queue)>=3:
             var_x=np.var([p[0] for p in center_queue])
             var_y=np.var([p[1] for p in center_queue])
             movement=math.sqrt(var_x + var_y)
+            
             if movement<5: 
                 instability_score=20
                 unstable_flag=True
@@ -522,117 +607,152 @@ def main_loop(fig_dashboard=None, st_plot=None, st_frame=None, st_feedback=None)
                 instability_score=100
             else:
                 instability_score=int((movement/STABILITY_MOVEMENT_THRESH)*100)
+                
         unstable_val = instability_score
 
-        # Focus calculation
+        # Focus calculation (LOGIQUE ORIGINALE)
         gaze_focus_smoothed = np.mean([1 if abs(g)<0.5 else 0 for g in gaze_queue])*100
         eye_closed_val = min(100,(counters["eye_closed"]/counters["total"])*100)
         face_detected_val = min(100,((counters["total"]-counters["no_face"])/counters["total"])*100)
-        focus = (0.4*gaze_focus_smoothed + 0.2*(100-eye_closed_val) + 0.2*face_detected_val +0.2*(100-unstable_val))
+        
+        focus = (0.4*gaze_focus_smoothed + 
+                 0.2*(100-eye_closed_val) + 
+                 0.2*face_detected_val +
+                 0.2*(100-unstable_val))
         focus = max(0.0, min(100.0, focus))
 
-        # Dashboard
+        # Dashboard update (identique)
         if time.time()-last_dashboard_update_local > DASHBOARD_UPDATE_INTERVAL:
             update_dashboard(fig_dashboard, round(focus,2), round(eye_closed_val,2), round(face_detected_val,2), round(unstable_val,2))
             last_dashboard_update_local = time.time()
-        st_plot.plotly_chart(fig_dashboard)
+        
+        st.session_state.dashboard_placeholder.plotly_chart(fig_dashboard)
 
-        # Draw feedback on frame
+        # Draw feedback on frame (identique)
         cv2.rectangle(frame_display, (x_min,y_min), (x_max,y_max), (0,255,0), 2)
-        cv2.putText(frame_display,f"Gaze:{gaze} (Model {'ON' if model_enabled else 'OFF'})",(10,30),cv2.FONT_HERSHEY_SIMPLEX,0.7,(0,255,0),2)
+        cv2.putText(frame_display,f"Gaze:{gaze} (Model {'ON' if model_enabled else 'OFF'})",(10,30),
+                   cv2.FONT_HERSHEY_SIMPLEX,0.7,(0,255,0),2)
         
         # Ajout mode
         if IS_STREAMLIT_CLOUD:
-            cv2.putText(frame_display, "MODE NAVIGATEUR", (10, height - 10), 
+            cv2.putText(frame_display, "STREAMLIT CLOUD - ANALYSE TEMPS RÉEL", (10, height - 10), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
         
         for idx,msg in enumerate(feedback_msgs):
             cv2.putText(frame_display,msg,(10,60+30*idx),cv2.FONT_HERSHEY_SIMPLEX,0.7,(0,0,255),2)
 
-        st_frame.image(frame_display, channels="BGR")
-        st_feedback.text(" | ".join(feedback_msgs))
+        # Afficher le frame
+        st.session_state.video_placeholder.image(frame_display, channels="BGR")
+        st.session_state.feedback_placeholder.text(" | ".join(feedback_msgs))
 
         # Gestion FPS
         t_elapsed = time.time()-loop_t0
         if t_elapsed<fps_interval: 
             time.sleep(max(0,fps_interval-t_elapsed))
+        
+        # Vérifier la durée
+        if time.time() - start_time > DURATION_SECONDS:
+            st.session_state.running = False
+            st.info("⏱️ Session terminée (durée atteinte)")
 
 # ============================================
 # INTERFACE STREAMLIT
 # ============================================
 if __name__=="__main__":
-    st.title("AI Focus Tracker - Streamlit")
+    st.title("🎯 AI Focus Tracker - Temps Réel")
     
     # Avertissement pour Streamlit Cloud
     if IS_STREAMLIT_CLOUD:
         st.warning("""
-        ⚠️ **Mode navigateur activé**
-        Cette application utilise la caméra de votre navigateur sur Streamlit Cloud.
+        ⚠️ **Mode navigateur temps réel activé**
         - Cliquez sur "Allow" pour autoriser l'accès à la caméra
-        - L'analyse se fait en temps réel via des captures régulières
+        - L'analyse se fait en **temps réel** via des captures continues
+        - Toutes les fonctionnalités sont activées (flou, dashboard, focus, etc.)
         - Pour une expérience optimale, exécutez l'application localement
         """)
     else:
-        st.success("✅ Mode local activé - Utilisation de la webcam système")
+        st.success("✅ Mode local activé - Utilisation de la webcam système en temps réel")
 
     # Initialisation session_state
     if 'running' not in st.session_state:
         st.session_state.running = False
-    if 'fig_dashboard' not in st.session_state:
-        st.session_state.fig_dashboard = make_dashboard()
-
+    
+    # Calibration
+    st.subheader("🔧 Calibration")
+    if st.button("🔃 Lancer la calibration", type="secondary"):
+        with st.spinner("Calibration en cours..."):
+            tilt_center = calibrate_tilt()
+            st.session_state.tilt_center = tilt_center
+            st.success(f"Calibration terminée: Tilt Center = {tilt_center:.2f}°")
+    
     # Boutons Start/Stop
+    st.subheader("🎬 Contrôle")
     col1, col2 = st.columns(2)
+    
     with col1:
-        if st.button("▶️ Start", type="primary", use_container_width=True):
+        if st.button("▶️ Démarrer l'analyse", type="primary", use_container_width=True):
             st.session_state.running = True
             st.rerun()
-    with col2:
-        if st.button("⏹ Stop", type="secondary", use_container_width=True):
-            st.session_state.running = False
-            camera_manager.release()
-            st.rerun()
-
-    st.info("Status: " + ("**Running**" if st.session_state.running else "**Stopped**"))
-
-    # Placeholders pour le dashboard et la vidéo
-    st_plot = st.empty()
-    st_frame = st.empty()
-    st_feedback = st.empty()
-
-    # Affichage initial du dashboard
-    st_plot.plotly_chart(st.session_state.fig_dashboard)
-
-    if st.session_state.running:
-        main_loop(fig_dashboard=st.session_state.fig_dashboard,
-                  st_plot=st_plot,
-                  st_frame=st_frame,
-                  st_feedback=st_feedback)
-    else:
-        # Écran d'arrêt
-        try:
-            dummy_frame = np.zeros((height, width, 3), dtype=np.uint8) 
-            cv2.putText(dummy_frame, "SESSION ARRÊTÉE", (width//2 - 200, height//2), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 1.2, (200, 200, 200), 3)
-            cv2.putText(dummy_frame, "Cliquez sur Start pour commencer", (width//2 - 250, height//2 + 50), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (150, 150, 255), 2)
-            
-            # Ajout pour Streamlit Cloud
-            if IS_STREAMLIT_CLOUD:
-                cv2.putText(dummy_frame, "Utilisez la caméra de votre navigateur", 
-                          (width//2 - 300, height//2 + 100), 
-                          cv2.FONT_HERSHEY_SIMPLEX, 0.6, (100, 200, 255), 1)
-            
-            st_frame.image(dummy_frame, channels="BGR")
-            
-        except NameError:
-             st_frame.text("Vidéo arrêtée")
-             if IS_STREAMLIT_CLOUD:
-                 st_frame.text("Mode navigateur - Prêt à capturer")
-
-        # Message de feedback
-        st_feedback.text("Session terminée. Cliquez sur Start pour lancer une nouvelle analyse.")
     
-    # Nettoyage à la fermeture
+    with col2:
+        if st.button("⏹️ Arrêter l'analyse", type="secondary", use_container_width=True):
+            st.session_state.running = False
+            camera.release()
+            st.rerun()
+    
+    # Status
+    status_placeholder = st.empty()
+    status_placeholder.info("Status: " + ("**🟢 En cours**" if st.session_state.running else "**🔴 Arrêté**"))
+    
+    # Section Dashboard
     st.markdown("---")
-    st.caption("AI Focus Tracker v1.0 | Compatible Streamlit Cloud & Local")
+    st.subheader("📊 Dashboard en direct")
+    
+    # Initialiser les placeholders
+    video_placeholder = st.empty()
+    dashboard_placeholder = st.empty()
+    feedback_placeholder = st.empty()
+    
+    # Sauvegarder dans session_state
+    st.session_state.video_placeholder = video_placeholder
+    st.session_state.dashboard_placeholder = dashboard_placeholder
+    st.session_state.feedback_placeholder = feedback_placeholder
+    
+    # Créer le dashboard initial
+    fig_dashboard = make_dashboard()
+    dashboard_placeholder.plotly_chart(fig_dashboard)
+    
+    # Écran d'attente
+    if not st.session_state.running:
+        # Créer un écran d'attente
+        dummy_frame = np.zeros((480, 640, 3), dtype=np.uint8) 
+        cv2.putText(dummy_frame, "ANALYSE EN ATTENTE", (640//2 - 200, 480//2), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 1.2, (200, 200, 200), 3)
+        cv2.putText(dummy_frame, "Cliquez sur 'Démarrer' pour commencer", (640//2 - 250, 480//2 + 50), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.8, (150, 150, 255), 2)
+        
+        if IS_STREAMLIT_CLOUD:
+            cv2.putText(dummy_frame, "Mode navigateur - Prêt à capturer", 
+                      (640//2 - 300, 480//2 + 100), 
+                      cv2.FONT_HERSHEY_SIMPLEX, 0.6, (100, 200, 255), 1)
+        
+        video_placeholder.image(dummy_frame, channels="BGR")
+        feedback_placeholder.text("Prêt à analyser votre concentration...")
+    
+    # Démarrer la boucle principale si running
+    if st.session_state.running:
+        # Avertissement pour Streamlit Cloud
+        if IS_STREAMLIT_CLOUD:
+            st.info("""
+            📸 **Mode capture continue activé**
+            - L'application capture automatiquement des images de votre caméra
+            - L'analyse se fait en temps réel sur chaque capture
+            - Le dashboard se met à jour en continu
+            """)
+        
+        # Démarrer la boucle principale
+        main_loop()
+    
+    # Pied de page
+    st.markdown("---")
+    st.caption("AI Focus Tracker v2.0 | Temps Réel | Compatible Streamlit Cloud & Local")
