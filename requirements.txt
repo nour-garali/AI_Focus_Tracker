@@ -5,3 +5,4 @@ numpy
 mediapipe==0.10.7
 tensorflow-cpu==2.13.0
 plotly
+tensorflow>=2.11.0
