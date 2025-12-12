@@ -1,4 +1,4 @@
-# app_streamlit.py
+# app_streamlit.py - VERSION AVEC SIMULATION FORCÉE
 import streamlit as st
 import numpy as np
 import math
@@ -21,7 +21,7 @@ if IS_STREAMLIT_CLOUD:
     # Mode démonstration pour Streamlit Cloud
     st.info("🔍 **Mode démonstration activé** - Streamlit Cloud détecté")
     
-    # Simulation d'OpenCV
+    # Simulation d'OpenCV FORCÉE
     class MockCV2:
         CAP_PROP_FRAME_WIDTH = 3
         CAP_PROP_FRAME_HEIGHT = 4
@@ -31,63 +31,6 @@ if IS_STREAMLIT_CLOUD:
         
         @staticmethod
         def VideoCapture(*args):
-            class MockCamera:
-                def __init__(self):
-                    self.is_opened_value = True
-                    self.width = 640
-                    self.height = 480
-                    self.frame_count = 0
-                    
-                def isOpened(self):
-                    return self.is_opened_value
-                    
-                def get(self, prop):
-                    if prop == 3:  # CAP_PROP_FRAME_WIDTH
-                        return self.width
-                    elif prop == 4:  # CAP_PROP_FRAME_HEIGHT
-                        return self.height
-                    return 0
-                    
-                def read(self):
-                    self.frame_count += 1
-                    # Créer une image de test
-                    frame = np.zeros((self.height, self.width, 3), dtype=np.uint8)
-                    
-                    # Dessiner un visage simulé
-                    center_x, center_y = self.width // 2, self.height // 2
-                    
-                    # Animation simple
-                    offset = int(20 * math.sin(self.frame_count * 0.1))
-                    
-                    # Tête
-                    cv2.ellipse(frame, (center_x, center_y), (100 + offset, 150), 
-                               0, 0, 360, (100, 100, 255), -1)
-                    
-                    # Yeux
-                    cv2.circle(frame, (center_x - 40, center_y - 30), 20, (255, 255, 255), -1)
-                    cv2.circle(frame, (center_x + 40, center_y - 30), 20, (255, 255, 255), -1)
-                    
-                    # Pupilles (qui bougent)
-                    pupil_offset = int(5 * math.sin(self.frame_count * 0.2))
-                    cv2.circle(frame, (center_x - 40 + pupil_offset, center_y - 30), 10, (0, 0, 0), -1)
-                    cv2.circle(frame, (center_x + 40 + pupil_offset, center_y - 30), 10, (0, 0, 0), -1)
-                    
-                    # Bouche
-                    mouth_width = 40 + int(10 * math.sin(self.frame_count * 0.15))
-                    cv2.ellipse(frame, (center_x, center_y + 40), (mouth_width, 15), 
-                               0, 0, 180, (50, 50, 200), 2)
-                    
-                    # Texte
-                    cv2.putText(frame, "DEMO MODE", (50, 30), 
-                              cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-                    cv2.putText(frame, f"Frame: {self.frame_count}", (50, 60), 
-                              cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
-                    
-                    return True, frame
-                    
-                def release(self):
-                    self.is_opened_value = False
-                    
             return MockCamera()
             
         @staticmethod
@@ -145,7 +88,7 @@ if IS_STREAMLIT_CLOUD:
     
     mp = MockMediaPipe()
     
-    # Simulation de TensorFlow
+    # TensorFlow sera importé normalement
     try:
         from tensorflow.keras.models import load_model
         from tensorflow.keras.losses import MeanSquaredError
@@ -167,9 +110,6 @@ else:
         st.stop()
 
 # -----------------------------
-# VOTRE CODE ORIGINAL COMMENCE ICI
-# -----------------------------
-# -----------------------------
 # CONFIGURATION
 # -----------------------------
 MODEL_PATH = "best_gaze_model.keras"
@@ -187,6 +127,108 @@ LEFT_EYE_IDX = [33, 160, 158, 133, 153, 144]
 RIGHT_EYE_IDX = [362, 385, 387, 263, 373, 380]
 
 DEBUG = False
+
+# -----------------------------
+# CLASSE CAMÉRA SIMULÉE (pour Streamlit Cloud)
+# -----------------------------
+class MockCamera:
+    def __init__(self):
+        self.is_opened_value = True
+        self.width = 640
+        self.height = 480
+        self.frame_count = 0
+        
+    def isOpened(self):
+        return self.is_opened_value
+        
+    def get(self, prop):
+        if prop == 3:  # CAP_PROP_FRAME_WIDTH
+            return self.width
+        elif prop == 4:  # CAP_PROP_FRAME_HEIGHT
+            return self.height
+        elif prop == 5:  # CAP_PROP_FPS
+            return 30
+        return 0
+        
+    def read(self):
+        self.frame_count += 1
+        # Créer une image de test
+        frame = np.zeros((self.height, self.width, 3), dtype=np.uint8)
+        
+        # Dessiner un visage simulé
+        center_x, center_y = self.width // 2, self.height // 2
+        
+        # Animation simple
+        offset = int(20 * math.sin(self.frame_count * 0.1))
+        
+        # Tête
+        cv2.ellipse(frame, (center_x, center_y), (100 + offset, 150), 
+                   0, 0, 360, (100, 100, 255), -1)
+        
+        # Yeux
+        cv2.circle(frame, (center_x - 40, center_y - 30), 20, (255, 255, 255), -1)
+        cv2.circle(frame, (center_x + 40, center_y - 30), 20, (255, 255, 255), -1)
+        
+        # Pupilles (qui bougent)
+        pupil_offset = int(5 * math.sin(self.frame_count * 0.2))
+        cv2.circle(frame, (center_x - 40 + pupil_offset, center_y - 30), 10, (0, 0, 0), -1)
+        cv2.circle(frame, (center_x + 40 + pupil_offset, center_y - 30), 10, (0, 0, 0), -1)
+        
+        # Bouche
+        mouth_width = 40 + int(10 * math.sin(self.frame_count * 0.15))
+        cv2.ellipse(frame, (center_x, center_y + 40), (mouth_width, 15), 
+                   0, 0, 180, (50, 50, 200), 2)
+        
+        # Texte
+        cv2.putText(frame, "STREAMLIT CLOUD DEMO", (50, 30), 
+                  cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        cv2.putText(frame, f"Frame: {self.frame_count}", (50, 60), 
+                  cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+        
+        return True, frame
+        
+    def release(self):
+        self.is_opened_value = False
+
+# -----------------------------
+# INITIALISATION CAMÉRA (SIMULATION FORCÉE sur Streamlit Cloud)
+# -----------------------------
+if IS_STREAMLIT_CLOUD:
+    # FORCE la simulation sur Streamlit Cloud
+    cap = MockCamera()
+    width, height = 640, 480
+    st.success("🎥 Caméra simulée activée (Streamlit Cloud)")
+else:
+    # Mode local avec vraie webcam
+    try:
+        cap = cv2.VideoCapture(0)
+        if not cap.isOpened():
+            st.error("Impossible d'ouvrir la caméra locale")
+            st.stop()
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        st.success(f"✅ Caméra locale connectée: {width}x{height}")
+    except Exception as e:
+        st.error(f"Erreur d'accès à la caméra: {e}")
+        st.stop()
+
+# -----------------------------
+# INITIALISATION MEDIAPIPE
+# -----------------------------
+if IS_STREAMLIT_CLOUD:
+    # Sur cloud, mp est déjà MockMediaPipe
+    mp_face_mesh = mp.solutions.face_mesh
+    face_mesh = mp_face_mesh.FaceMesh()
+else:
+    # En local, vrai MediaPipe
+    mp_face_mesh = mp.solutions.face_mesh
+    face_mesh = mp_face_mesh.FaceMesh(
+        static_image_mode=False,
+        max_num_faces=1,
+        refine_landmarks=True,
+        min_detection_confidence=0.5,
+        min_tracking_confidence=0.5
+    )
 
 # -----------------------------
 # UTILITAIRES
@@ -229,138 +271,79 @@ def color_bar(val):
     elif val > 40: return "orange"
     else: return "red"
 
-# ============================================
-# SECTION 1 CORRIGÉE : LOAD MODEL (lignes ~170-190)
-# ============================================
+# -----------------------------
+# LOAD MODEL (VERSION ROBUSTE)
+# -----------------------------
 def load_gaze_model(path):
-    """Charge le modèle - VERSION CORRIGÉE POUR STREAMLIT CLOUD"""
+    """Charge le modèle - version robuste pour Streamlit Cloud"""
     try:
-        # 1. Vérifie si le fichier existe
+        if not TENSORFLOW_AVAILABLE:
+            st.warning("TensorFlow non disponible - Mode simulation")
+            return None
+            
         if not os.path.exists(path):
             if IS_STREAMLIT_CLOUD:
+                # Crée un modèle simple si absent sur Streamlit Cloud
                 st.info("📁 Création d'un modèle de démonstration...")
-                # En mode cloud, crée un modèle simple si absent
-                create_demo_model(path)
+                try:
+                    import tensorflow as tf
+                    model = tf.keras.Sequential([
+                        tf.keras.layers.Input(shape=(64, 64, 3)),
+                        tf.keras.layers.Flatten(),
+                        tf.keras.layers.Dense(1, activation='tanh')
+                    ])
+                    model.compile(optimizer='adam', loss='mse')
+                    model.save(path)
+                    st.success(f"✅ Modèle de démo créé: {path}")
+                except:
+                    st.warning("❌ Impossible de créer le modèle de démo")
+                    return None
             else:
                 st.error(f"Fichier modèle {path} non trouvé")
                 return None
         
-        # 2. Charge le modèle - SIMPLIFIÉ pour éviter les erreurs
-        if IS_STREAMLIT_CLOUD:
-            # Sur Streamlit Cloud, charge SANS custom_objects
-            model_local = load_model(path, compile=False)
-        else:
-            # En local, essaie avec custom_objects
+        # Charge le modèle avec gestion d'erreur
+        try:
+            # Essaie d'abord avec custom_objects
+            model_local = load_model(path, custom_objects={'mse': MeanSquaredError()})
+        except:
+            # Si échec, essaie sans custom_objects
             try:
-                model_local = load_model(path, custom_objects={'mse': MeanSquaredError()})
-            except:
-                # Si échec, charge sans custom_objects
                 model_local = load_model(path, compile=False)
+            except Exception as e:
+                if "conv2d" in str(e).lower() or "conv1" in str(e).lower():
+                    # Erreur de couche Conv2D - on charge quand même pour la structure
+                    st.warning("⚠️ Modèle chargé en mode limité (couche Conv2D)")
+                    model_local = load_model(path, compile=False)
+                else:
+                    raise e
         
         st.success("✅ Modèle gaze chargé.")
         return model_local
         
     except Exception as e:
-        # En cas d'erreur, on utilise quand même le modèle mais en mode "limité"
         error_msg = str(e)
-        if "Layer 'conv1' expected 2 variables" in error_msg:
-            st.warning("⚠️ Modèle partiellement chargé - Prédictions basiques activées")
-            # On charge quand même le modèle (il fonctionnera partiellement)
-            try:
-                return load_model(path, compile=False)
-            except:
-                return None
+        if IS_STREAMLIT_CLOUD:
+            st.info(f"🧪 Mode simulation Streamlit Cloud: {error_msg[:60]}")
         else:
-            st.warning(f"🧪 Mode simulation: {error_msg[:80]}")
-            return None
-
-def create_demo_model(path):
-    """Crée un modèle de démo si absent sur Streamlit Cloud"""
-    try:
-        import tensorflow as tf
-        model = tf.keras.Sequential([
-            tf.keras.layers.Input(shape=(64, 64, 3)),
-            tf.keras.layers.Flatten(),
-            tf.keras.layers.Dense(1, activation='tanh')
-        ])
-        model.compile(optimizer='adam', loss='mse')
-        model.save(path)
-        st.info(f"✅ Modèle de démo créé: {path}")
-    except:
-        st.warning("❌ Impossible de créer le modèle de démo")
+            st.warning(f"🧪 Mode simulation: {error_msg[:60]}")
+        return None
 
 model = load_gaze_model(MODEL_PATH)
 model_enabled = True  # Toujours activé pour garder votre logique
 
-# ============================================
-# SECTION 2 CORRIGÉE : CAMERA & MEDIAPIPE (lignes ~200-240)
-# ============================================
 # -----------------------------
-# CAMERA & MEDIAPIPE - VERSION CORRIGÉE
-# -----------------------------
-if IS_STREAMLIT_CLOUD:
-    # Sur Streamlit Cloud : UTILISE DIRECTEMENT LA CAMÉRA SIMULÉE
-    # Pas besoin de try/except car MockCV2.VideoCapture() retourne toujours un MockCamera
-    cap = cv2.VideoCapture(0)  # Appelle MockCV2.VideoCapture()
-    st.info("🎥 Caméra simulée (Streamlit Cloud)")
-else:
-    # En local : vraie webcam avec gestion d'erreur propre
-    try:
-        cap = cv2.VideoCapture(0)
-        if not cap.isOpened():
-            st.error("❌ Impossible d'ouvrir la caméra. Vérifiez:")
-            st.error("1. La caméra est branchée")
-            st.error("2. Aucune autre application n'utilise la caméra")
-            st.error("3. Les permissions sont accordées")
-            st.stop()
-    except Exception as e:
-        st.error(f"🚫 Erreur d'accès à la caméra: {e}")
-        st.stop()
-
-# Dimensions (toujours valides car MockCamera a width/height)
-try:
-    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-except:
-    width, height = 640, 480  # Valeurs par défaut
-
-# MediaPipe - version résiliente
-try:
-    if IS_STREAMLIT_CLOUD:
-        # Sur cloud, mp est déjà MockMediaPipe
-        mp_face_mesh = mp.solutions.face_mesh
-        face_mesh = mp_face_mesh.FaceMesh()
-    else:
-        # En local, vrai MediaPipe
-        mp_face_mesh = mp.solutions.face_mesh
-        face_mesh = mp_face_mesh.FaceMesh(
-            static_image_mode=False,
-            max_num_faces=1,
-            refine_landmarks=True,
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5
-        )
-except Exception as e:
-    st.warning(f"⚠️ MediaPipe en mode limité: {str(e)[:50]}")
-    # On continue avec ce qu'on a
-
-# ============================================
-# SECTION 3 CORRIGÉE : CALIBRATION (lignes ~260-290)
-# ============================================
-# -----------------------------
-# CALIBRATION TILT - VERSION ADAPTATIVE
+# CALIBRATION TILT (ADAPTATIVE)
 # -----------------------------
 def calibrate_tilt(frames=CALIBRATION_FRAMES):
     """Calibration adaptée à l'environnement"""
     if IS_STREAMLIT_CLOUD:
         st.info("🔹 Calibration simulée...")
-        # Sur cloud, calibration instantanée avec valeurs simulées
         time.sleep(1)  # Petit délai visuel
-        tilt_center = 0.0  # Centré par défaut
+        tilt_center = 0.0
         st.success(f"✅ Calibration terminée. Tilt_center={tilt_center:.2f} (simulé)")
         return tilt_center
     else:
-        # En local, vraie calibration
         st.info("🔹 Calibration tilt...")
         tilt_values = []
         count = 0
@@ -388,19 +371,15 @@ def calibrate_tilt(frames=CALIBRATION_FRAMES):
         st.success(f"✅ Calibration terminée. Tilt_center={center:.2f}")
         return center
 
-tilt_center = 0.0  # Valeur par défaut
+tilt_center = 0.0
 try:
     tilt_center = calibrate_tilt(CALIBRATION_FRAMES)
 except Exception as e:
-    st.warning(f"Calibration simplifiée - Tilt_center=0.0 ({str(e)[:50]})")
+    st.warning(f"Calibration simplifiée - Tilt_center=0.0")
     tilt_center = 0.0
 
-# ============================================
-# TOUT LE RESTE DE VOTRE CODE RESTE IDENTIQUE !
-# ============================================
-
 # -----------------------------
-# DASHBOARD (inchangé)
+# DASHBOARD
 # -----------------------------
 def make_dashboard():
     fig = make_subplots(
@@ -437,7 +416,7 @@ st_frame = st.empty()
 st_feedback = st.empty()
 
 # -----------------------------
-# CORRECTION : Variables manquantes (inchangé)
+# CORRECTION : Variables manquantes
 # -----------------------------
 def get_eye_open_values(lm, width, height):
     """Calcule les valeurs eye_open_left et eye_open_right"""
@@ -455,7 +434,7 @@ def get_eye_open_values(lm, width, height):
         return 10.0, 10.0  # Valeurs par défaut
 
 # -----------------------------
-# MAIN LOOP STREAMLIT (inchangé)
+# MAIN LOOP STREAMLIT
 # -----------------------------
 def main_loop(fig_dashboard=None, st_plot=None, st_frame=None, st_feedback=None):
     global model_enabled, DEBUG, IS_STREAMLIT_CLOUD
@@ -644,6 +623,8 @@ if __name__=="__main__":
         Cette application fonctionne en mode simulation sur Streamlit Cloud.
         Pour utiliser toutes les fonctionnalités (webcam, modèle réel), exécutez l'application localement.
         """)
+    else:
+        st.success("✅ Mode local activé - Utilisation de la webcam réelle")
 
     # Initialisation session_state
     if 'running' not in st.session_state:
